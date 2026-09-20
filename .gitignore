@@ -1,0 +1,29 @@
+# Runtime data and local credentials
+work/*_cache/
+work/image_hook_diag_cache/
+work/group_diag/
+work/wechat_ai_bridge_state/
+work/vision_tmp/
+**/*.db
+**/*.db-*
+**/keys.json
+**/keys.json.bak
+**/*.log
+*.log
+.env
+*.token
+*.secret
+
+# Python generated files
+__pycache__/
+*.py[cod]
+.venv/
+
+# Local configuration containing account identifiers or endpoints
+outputs/WeChatAI/config.json
+
+# Build/editor artifacts
+dist/
+build/
+.idea/
+.vscode/

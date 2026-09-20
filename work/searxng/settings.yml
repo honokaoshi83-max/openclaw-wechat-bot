@@ -1,0 +1,19 @@
+use_default_settings: true
+server:
+  secret_key: "openclaw-local-searxng-2026"
+  bind_address: "0.0.0.0"
+  port: 8080
+  public_instance: false
+  image_proxy: false
+search:
+  safe_search: 0
+  formats:
+    - html
+    - json
+engines:
+  - name: bing
+    engine: bing
+  - name: brave
+    engine: brave
+  - name: duckduckgo
+    engine: duckduckgo
