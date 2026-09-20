@@ -14,6 +14,7 @@ This project uses a dedicated WeChat account for private and group conversations
 
 - 私聊和群聊回复 / Private and group chat replies
 - DeepSeek 与本地 Qwen 切换 / Switch between DeepSeek and local Qwen
+- 新账号和新会话默认使用本地 Qwen；可发送 /deepseek 手动切换 / New accounts and conversations default to local Qwen; send /deepseek to switch
 - `/fast` 和 `/think` 模式 / Fast and thinking modes
 - Qwen 低精度图片、表情包、GIF 识别 / Qwen image, emoji, and GIF recognition
 - DeepSeek V4.1 Flash 高准确识图 / DeepSeek V4.1 Flash visual recognition
@@ -326,3 +327,4 @@ OPENCLAW_WECHAT_PROJECT_SUMMARY.md
 ```
 
 See `OPENCLAW_WECHAT_PROJECT_SUMMARY.md` for detailed progress and known limitations.
+
