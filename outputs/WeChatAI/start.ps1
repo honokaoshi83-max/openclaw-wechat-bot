@@ -10,6 +10,12 @@ $stderrLog = Join-Path $runtime 'bridge.err.log'
 if (-not (Test-Path -LiteralPath $python)) {
     throw "Python environment missing: $python"
 }
+# Start-Process can inherit a stale PowerShell environment after a user-level
+# variable was added. Load the saved user key explicitly for the bridge child.
+$deepseekKey = [Environment]::GetEnvironmentVariable('DEEPSEEK_API_KEY', 'User')
+if ($deepseekKey) {
+    $env:DEEPSEEK_API_KEY = $deepseekKey
+}
 New-Item -ItemType Directory -Force -Path $runtime | Out-Null
 $existing = @()
 if (Test-Path -LiteralPath $pidFile) {
@@ -22,6 +28,21 @@ if (Test-Path -LiteralPath $pidFile) {
 if ($existing) {
     Write-Output "Bridge already running: PID $($existing[0].Id)"
     exit 0
+}
+# Also inspect the process table. A watchdog restart can race with this script
+# before the PID file is rewritten, which would make two bridges share db_cache.
+try {
+    $running = @(Get-CimInstance Win32_Process -ErrorAction Stop | Where-Object {
+        $_.Name -in @('python.exe', 'pythonw.exe') -and
+        $_.CommandLine -and $_.CommandLine.Contains($bridge)
+    })
+    if ($running.Count -gt 0) {
+        Write-Output "Bridge already running: PID $($running[0].ProcessId)"
+        Set-Content -LiteralPath $pidFile -Value $running[0].ProcessId -Encoding ascii
+        exit 0
+    }
+} catch {
+    # PID-file checking above remains the fallback for restricted WMI access.
 }
 
 # Keep the previous process output so an unhandled traceback is never lost:

@@ -16,6 +16,7 @@ import sys
 import threading
 import time
 import ctypes
+import msvcrt
 import urllib.error
 import urllib.request
 import urllib.parse
@@ -42,14 +43,16 @@ RUNTIME_DIR = ROOT / "work" / "wechat_ai_bridge_state"
 STATE_PATH = RUNTIME_DIR / "state.json"
 LOG_PATH = RUNTIME_DIR / "bridge.log"
 LOG = logging.getLogger("wechat_ai_bridge")
+INSTANCE_LOCK_PATH = RUNTIME_DIR / "bridge.instance.lock"
+INSTANCE_LOCK_HANDLE = None
 STATE_SAVE_LOCK = threading.RLock()
 ONLINE_NOTICE = "当前模型已上线，如有需求可以现在开始对话"
 TOKYO_TIMEZONE = timezone(timedelta(hours=9), name="Asia/Tokyo")
 DAILY_HELP_TEMPLATE = """时间：{year}年{month}月{day}日
-大肥鱼0.3版本
+大肥鱼0.4版本
 重大更新！
-已支持图像识别、表情包识别、GIF识别（0.2版本更新）！
-（图像功能仅支持qwen模型下使用）
+qwen已支持图像识别、表情包识别、GIF识别（此模式为低精确识图）。（0.2版本更新）
+DeepSeek已支持识图（此模式下为高准确识图）。（0.4版本更新）
 加入了联网搜索功能（0.3版本更新）。
 🐋🐋🐋🐋🐋🐋🐋🐋🐋🐋🐋
 
@@ -60,7 +63,8 @@ DAILY_HELP_TEMPLATE = """时间：{year}年{month}月{day}日
 本地模型进入快速模式：/fast
 压缩当前会话上下文：/compact
 重置当前会话上下文：/reset
-联网搜索：/search"""
+联网搜索：/search
+清除当前会话所有记忆：/clear（⚠此操作会清除当前会话所有记忆⚠）"""
 SHORT_CHAT_INSTRUCTION = (
     "\n\n[回复风格要求：这是简短聊天，请只用 1～2 句自然回应，"
     "不要主动展开话题、列清单或长篇解释。]"
@@ -170,6 +174,19 @@ def extract_group_mention(content: str, mention_names: list[str]) -> str | None:
     return None
 
 
+def extract_group_quote_request(content: str, mention_names: list[str]) -> tuple[str | None, bool]:
+    """Extract @ request and image-reference flag from WeChat quote cards."""
+    raw = html_lib.unescape(str(content or ""))
+    title_match = re.search(r"<title>\s*(.*?)\s*</title>", raw, re.S | re.I)
+    if not title_match:
+        return None, False
+    title = re.sub(r"\s+", " ", title_match.group(1)).strip()
+    request = extract_group_mention(title, mention_names)
+    if request is None:
+        return None, False
+    return request, bool(re.search(r"<refermsg>.*?<type>\s*3\s*</type>.*?</refermsg>", raw, re.S | re.I))
+
+
 GROUP_VISUAL_KEYWORDS = ("识别图片", "识别图像", "看看图片", "看图", "识别表情包",
                          "识别表情", "识别gif", "识别gif图", "看看gif", "分析图片")
 GROUP_VISUAL_WINDOW_MS = 3000
@@ -178,6 +195,202 @@ GROUP_VISUAL_WINDOW_MS = 3000
 def is_group_visual_request(request: str) -> bool:
     text = re.sub(r"\s+", "", str(request or "").lower())
     return any(keyword in text for keyword in GROUP_VISUAL_KEYWORDS) or "gif" in text
+
+
+def is_pure_visual_request(request: str) -> bool:
+    text = re.sub(r"[\s。！？!?，,、]+", "", str(request or "")).lower()
+    return text in {"识别图片", "识别图像", "识别一下", "这是什么", "看看图片", "看看图", "分析图片"}
+
+
+def is_group_visual_history_request(request: str) -> bool:
+    """Match requests referring to an image already sent in the group."""
+    text = re.sub(r"\s+", "", str(request or "").lower())
+    markers = ("上面这张图片", "上面的图片", "上面那张图", "刚才的图片",
+               "刚才那张图", "前面的图片", "之前的图片", "这张图片", "这张图",
+               "这是什么", "评论一下", "评价一下", "分析一下")
+    visual_intent = (is_group_visual_request(text + "识别图片") or
+                     any(word in text for word in ("引用", "图片", "图", "表情", "gif")))
+    return any(marker in text for marker in markers) and visual_intent
+
+
+def compact_visual_reply(text: str) -> str:
+    """Keep visual replies short, plain, and readable in WeChat."""
+    clean = str(text or "").replace("\r", " ").replace("\n", " ")
+    clean = re.sub(r"```[^`]*```", "", clean, flags=re.S)
+    clean = clean.replace("**", "").replace("__", "")
+    clean = re.sub(r"（[^（）]{0,24}(?:动作|尾巴|摇|晃|识别流程)[^（）]{0,24}）", "", clean)
+    clean = re.sub(r"^\s*[-*+#>]\s*", "", clean)
+    clean = re.sub(r"([，。！？、；：,.!?])\1+", r"\1", clean)
+    clean = re.sub(r"\s+", " ", clean).strip()
+    return clean
+
+
+def extract_quoted_message_text(content: str) -> tuple[str, str] | None:
+    """Return (user_text, quoted_text) for WeChat's quote message format."""
+    match = re.search(r"^(.*?)\s*\n引用\s+(.+?)\s+的消息\s*:\s*(.*)$",
+                      str(content or ""), re.S)
+    if not match:
+        return None
+    return match.group(1).strip(), match.group(3).strip()
+
+
+def is_quoted_visual_search(content: str) -> bool:
+    quoted = extract_quoted_message_text(content)
+    if not quoted:
+        return False
+    text = re.sub(r"\s+", "", quoted[1].lower())
+    intent = re.sub(r"\s+", "", quoted[0].lower())
+    return ("图片" in text or "图像" in text or "表情" in text or "gif" in text
+            or "这是什么" in intent or "识别" in intent or "评论" in intent)
+
+
+def is_quoted_visual_request(content: str) -> bool:
+    """Detect WeChat quote cards that point at an image or animated sticker."""
+    raw = html_lib.unescape(str(content or ""))
+    if re.search(r"<refermsg>.*?<type>\s*(?:3|47|49|62)\s*</type>.*?</refermsg>",
+                 raw, re.S | re.I):
+        text = re.sub(r"\s+", "", raw.lower())
+        return any(word in text for word in ("这是什么", "识别", "评论", "分析", "图片", "图像", "表情", "gif"))
+    return is_quoted_visual_search(content)
+
+
+def nearby_visual_messages(history: list[dict], request: dict, radius: int = 2) -> list[dict]:
+    """Find visual messages in the two-message neighborhood of a request."""
+    if not history:
+        return []
+    ordered = sorted(history, key=lambda item: int(item.get("sort_seq") or 0))
+    try:
+        index = next(i for i, item in enumerate(ordered)
+                     if int(item.get("local_id") or 0) == int(request.get("local_id") or 0))
+    except StopIteration:
+        index = len(ordered)
+    sender = str(request.get("sender_username") or request.get("sender_id") or "")
+    # WeChat quote cards embed the original image XML. Match its md5 first so
+    # an older nearby image cannot be mistaken for the quoted one.
+    raw = html_lib.unescape(str(request.get("content") or ""))
+    quoted_md5 = next((value.lower() for value in re.findall(
+        r"(?:<refermsg>.*?){0,1}\bmd5\s*=\s*[\"']([0-9a-f]{32})[\"']", raw,
+        re.S | re.I)), "")
+    if quoted_md5:
+        exact = []
+        for item in ordered:
+            if not is_visual_message(item):
+                continue
+            item_md5 = re.search(r"\bmd5\s*=\s*[\"']([0-9a-f]{32})[\"']",
+                                 str(item.get("content") or ""), re.I)
+            if item_md5 and item_md5.group(1).lower() == quoted_md5:
+                exact.append(item)
+        if exact:
+            return [exact[-1]]
+    rows = []
+    for distance in range(1, radius + 1):
+        for position in (index - distance, index + distance):
+            if position < 0 or position >= len(ordered):
+                continue
+            item = ordered[position]
+            if not is_visual_message(item):
+                continue
+            if quoted_md5:
+                item_md5 = re.search(r"\bmd5\s*=\s*[\"']([0-9a-f]{32})[\"']",
+                                     str(item.get("content") or ""), re.I)
+                if item_md5 and item_md5.group(1).lower() == quoted_md5:
+                    rows.append((-1, 0, 0, item))
+                    continue
+            item_sender = str(item.get("sender_username") or item.get("sender_id") or "")
+            rows.append((0 if sender and sender == item_sender else 1, distance,
+                         0 if position < index else 1, item))
+    rows.sort(key=lambda row: row[:3])
+    return [row[3] for row in rows]
+
+
+def summarize_quoted_visual_reply(db, config: dict, peer: str, chat: dict,
+                                  msg: dict, request: str) -> str:
+    """Recognize the visual message referred to by a private quote card."""
+    current_seq = int(msg.get("sort_seq") or 0)
+    history = db.get_messages(peer, limit=50)
+    candidates = nearby_visual_messages(history, msg)
+    if not candidates:
+        candidates = [item for item in history
+                      if int(item.get("sort_seq") or 0) < current_seq and is_visual_message(item)]
+    if not candidates:
+        return "引用图片未能从最近50条消息中找到，暂时无法识别。"
+    source = candidates[-1]
+    image_path = vision_path = None
+    try:
+        image_temp = RUNTIME_DIR / "vision_tmp"
+        image_path = extract_visual(db, peer, int(source["local_id"]), source, image_temp,
+                                    hook_url=str(config.get("hook_url") or ""))
+        vision_path = prepare_vision_image(image_path, image_temp)
+        label = "动画表情" if is_emoji_message(source) else "图片"
+        description = describe_image(
+            vision_path,
+            f"请客观描述这个{label}的外形、颜色、结构和清晰文字，判断主体时不要猜测；"
+            "无法确认就明确说明。只输出简洁事实。",
+            config, model_alias=chat.get("model", "qwen"),
+        )
+        prompt = prepare_model_prompt(
+            f"用户引用了一条{label}并提问：{request}\n视觉识别结果：{description}\n"
+            "请用一句自然、通顺的中文回答，最多60个中文字符。不要使用Markdown、连续标点或动作描写。"
+        )
+        return compact_visual_reply(ask_openclaw(
+            config, peer, chat.get("model", "qwen"), chat.get("thinking", "off"), prompt,
+            epoch=int(chat.get("session_epoch", 0))))
+    except (ImageUnavailable, VisionError, OSError, KeyError):
+        LOG.exception("quoted visual reply failed peer=%s seq=%s", peer, msg.get("sort_seq"))
+        return "引用图片已找到，但暂时无法识别。"
+    finally:
+        for path in {path for path in (vision_path, image_path) if path is not None}:
+            try:
+                cleanup_image(path, RUNTIME_DIR / "vision_tmp")
+            except (OSError, ValueError):
+                LOG.exception("quoted visual reply cleanup failed path=%s", path)
+
+
+def summarize_quoted_visual_search(db, config: dict, peer: str, chat: dict,
+                                   msg: dict, request: str) -> str:
+    """Recognize the latest quoted image, then search its visual content."""
+    current_seq = int(msg.get("sort_seq") or 0)
+    history = db.get_messages(peer, limit=50)
+    candidates = nearby_visual_messages(history, msg)
+    if not candidates:
+        candidates = [item for item in history
+                      if int(item.get("sort_seq") or 0) < current_seq
+                      and is_visual_message(item)]
+    if not candidates:
+        return "引用图片未能从最近50条消息中找到，无法进行图片联网搜索。"
+    source = candidates[-1]
+    image_path = vision_path = None
+    try:
+        image_temp = RUNTIME_DIR / "vision_tmp"
+        image_path = extract_visual(
+            db, peer, int(source["local_id"]), source, image_temp,
+            hook_url=str(config.get("hook_url") or ""),
+        )
+        vision_path = prepare_vision_image(image_path, image_temp)
+        description = describe_image(
+            vision_path,
+            "先客观描述可见的外形、颜色、结构和文字，再提取适合联网搜索的关键信息："
+            "人物、地点、物品、品牌、事件、画面文字。不要仅凭模糊轮廓猜测；无法确认时写‘无法确认’。"
+            "只输出简洁事实，不要写动作描写。",
+            config,
+            model_alias=chat.get("model", "qwen"),
+        )
+        query = f"{request}\n图片识别出的搜索线索：{description}"
+        try:
+            image_evidence = search_image_evidence(config, description)
+        except Exception:
+            LOG.exception("image search failed peer=%s seq=%s", peer, msg.get("sort_seq"))
+            image_evidence = "（图片搜索没有返回结果）"
+        return summarize_search(config, peer, chat, query, image_evidence)
+    except (ImageUnavailable, VisionError, OSError, KeyError):
+        LOG.exception("quoted visual search failed peer=%s seq=%s", peer, msg.get("sort_seq"))
+        return "引用图片已找到，但图片识别未完成，暂时无法联网搜索。"
+    finally:
+        for path in {path for path in (vision_path, image_path) if path is not None}:
+            try:
+                cleanup_image(path, RUNTIME_DIR / "vision_tmp")
+            except (OSError, ValueError):
+                LOG.exception("quoted visual search cleanup failed path=%s", path)
 
 
 def make_group_visual_pending(sender: str, sort_seq: int, request: str) -> dict:
@@ -291,10 +504,11 @@ def trim_transcript_lines(lines: list[str], max_chars: int = GROUP_SUMMARY_MAX_C
     return "\n".join(kept)
 
 
-def group_summary_prompt(history: list[dict], request: str) -> str:
+def group_summary_prompt(history: list[dict], request: str, own_sender_id: int = 1) -> str:
     lines = []
     for item in history[-GROUP_SUMMARY_HISTORY_LIMIT:]:
-        if int(item.get("sender_id") or 0) == 1:
+        # Bot messages are delivery artifacts, not group discussion content.
+        if int(item.get("sender_id") or 0) in (0, own_sender_id):
             continue
         body = str(item.get("content") or "").strip()
         if not body or body.startswith("["):
@@ -344,6 +558,8 @@ def classify_message(msg: dict, own_sender_id: int):
         return ("compact", "")
     if command == "/reset":
         return ("reset", "")
+    if command == "/clear":
+        return ("clear", "")
     return ("prompt", content)
 
 
@@ -407,7 +623,25 @@ def polish_search_reply(text: str) -> str:
     return clean.strip()
 
 
-def summarize_search(config: dict, peer: str, chat: dict, query: str) -> str:
+def search_image_evidence(config: dict, query: str) -> str:
+    """Fetch compact image-search results from local SearXNG."""
+    endpoint = str(config.get("searxng_url", "http://127.0.0.1:8888")).rstrip("/")
+    url = endpoint + "/search?" + urllib.parse.urlencode({
+        "q": query, "format": "json", "language": "zh-CN", "categories": "images"})
+    request = urllib.request.Request(url, headers={"User-Agent": "OpenClaw-WeChatBot/0.3"})
+    with urllib.request.urlopen(request, timeout=8) as response:
+        payload = json.loads(response.read().decode("utf-8", errors="replace"))
+    rows = []
+    for item in (payload.get("results") or [])[:4]:
+        title = re.sub(r"\s+", " ", str(item.get("title") or "")).strip()
+        source = str(item.get("source") or item.get("url") or "").strip()
+        if title:
+            rows.append(f"图片结果：{title}；来源：{source}")
+    return "\n".join(rows)
+
+
+def summarize_search(config: dict, peer: str, chat: dict, query: str,
+                     extra_evidence: str = "") -> str:
     include_links = search_requests_links(query)
     # Fetch a small, bounded result set locally from Docker SearXNG first.  Passing
     # raw web-search tool output to the agent can consume its output budget before
@@ -439,6 +673,8 @@ def summarize_search(config: dict, peer: str, chat: dict, query: str) -> str:
                 rows.append(f"标题：{title}{date_line}\n摘要：{content[:500]}" +
                             (f"\n来源：{href}" if include_links and href else ""))
         evidence = "\n\n".join(rows) or "（搜索没有返回可用摘要）"
+        if extra_evidence:
+            evidence += "\n\n" + extra_evidence
     except Exception:
         LOG.exception("SearXNG search failed peer=%s query=%s", peer, query)
         evidence = "（本地搜索暂时没有返回可用摘要）"
@@ -503,6 +739,16 @@ def reset_session_reply(chat: dict) -> str:
     """Handle /reset: start a brand new OpenClaw session for this chat."""
     chat["session_epoch"] = int(chat.get("session_epoch", 0)) + 1
     return "已开启新会话，之前的上下文不再带入。"
+
+
+def clear_chat_memory(state: dict, peer: str, chat: dict) -> str:
+    """Forget only this private chat or group and start a fresh session epoch."""
+    chat["session_epoch"] = int(chat.get("session_epoch", 0)) + 1
+    chat.pop("daily_help_date", None)
+    pending = state.get("group_visual_pending")
+    if isinstance(pending, dict):
+        pending.pop(peer, None)
+    return "当前对话记忆已清除，可以重新开始。"
 
 
 def split_humanized_reply(text: str, max_parts: int = 3) -> list[str]:
@@ -1035,29 +1281,66 @@ def process_group_task(db, config: dict, state: dict, task: dict) -> None:
     request_text = task["request"]
     chat = state["chats"][peer]
     started = time.monotonic()
-    if is_visual_message(msg):
+    visual_msg = msg
+    if task.get("reference_latest_visual"):
+        # Resolve the latest image at worker time so a queued request sees the
+        # most recent completed media row, not just the text that mentioned it.
+        history = db.get_messages(peer, limit=50)
+        candidates = nearby_visual_messages(history, msg)
+        if not candidates:
+            candidates = [item for item in history
+                          if int(item.get("sort_seq") or 0) < int(msg.get("sort_seq") or 0)
+                          and is_visual_message(item)]
+        if candidates:
+            visual_msg = candidates[-1]
+            LOG.info("group visual history matched peer=%s request_seq=%s image_seq=%s",
+                     peer, msg.get("sort_seq"), visual_msg.get("sort_seq"))
+        else:
+            LOG.info("group visual history not found peer=%s request_seq=%s",
+                     peer, msg.get("sort_seq"))
+    if task.get("visual_search"):
+        reply = summarize_quoted_visual_search(db, config, peer, chat, msg, request_text)
+        reply = format_timed_reply(reply, time.monotonic() - started,
+                                   chat.get("model", "qwen"), chat.get("thinking", "off"))
+        send_wechat(db, peer, reply, config["ai_sender_id"], config=config)
+        if request_text and not is_pure_visual_request(request_text):
+            text_reply = sanitize_reply(ask_openclaw(
+                config, peer, chat.get("model", "qwen"), chat.get("thinking", "off"),
+                prepare_model_prompt(request_text), epoch=int(chat.get("session_epoch", 0))))
+            send_wechat(db, peer, format_timed_reply(
+                text_reply, time.monotonic() - started,
+                chat.get("model", "qwen"), chat.get("thinking", "off")),
+                config["ai_sender_id"], config=config)
+        LOG.info("group visual search reply verified peer=%s seq=%s chars=%s",
+                 peer, msg.get("sort_seq"), len(reply))
+        return
+    if is_visual_message(visual_msg):
         image_path = vision_path = None
         try:
             image_temp = RUNTIME_DIR / "vision_tmp"
             image_path = extract_visual(
-                db, peer, int(msg["local_id"]), msg, image_temp,
+                db, peer, int(visual_msg["local_id"]), visual_msg, image_temp,
                 hook_url=str(config.get("hook_url") or ""),
             )
             vision_path = prepare_vision_image(image_path, image_temp)
-            label = "动画表情" if is_emoji_message(msg) else "图片"
+            label = "动画表情" if is_emoji_message(visual_msg) else "图片"
             description = describe_image(
                 vision_path,
-                f"请客观描述这个{label}的主要内容、动作和情绪，并读取清晰可见的文字。只输出简洁描述。",
+                f"请先客观描述这个{label}可见的外形、颜色、结构和文字，再判断主体。"
+                "不要仅凭模糊轮廓猜测，无法确认时明确说无法确认。只输出简洁事实。",
                 config,
+                model_alias=chat.get("model", "qwen"),
             )
             prompt = prepare_model_prompt(
                 f"用户在群聊中请求识别{label}。视觉识别结果：\n{description}\n\n"
-                "请用一段简短自然的话回复，并直接@用户，不要提及识别流程。"
+                "请只用一句自然、通顺的中文纯文本回复，最多60个中文字符。"
+                "不要使用Markdown、项目符号、括号动作或连续标点，不要提及识别流程。"
             )
             reply = sanitize_reply(ask_openclaw(
-                config, peer, "qwen", chat.get("thinking", "off"), prompt,
+                config, peer, chat.get("model", "qwen"), chat.get("thinking", "off"), prompt,
                 epoch=int(chat.get("session_epoch", 0)),
             ))
+            reply = compact_visual_reply(reply)
         except (ImageUnavailable, VisionError, OSError, KeyError):
             LOG.exception("group image processing failed peer=%s seq=%s", peer, msg.get("sort_seq"))
             reply = "图片已收到，但暂时无法识别。"
@@ -1067,9 +1350,11 @@ def process_group_task(db, config: dict, state: dict, task: dict) -> None:
                     cleanup_image(path, RUNTIME_DIR / "vision_tmp")
                 except (OSError, ValueError):
                     LOG.exception("group image cleanup failed path=%s", path)
+        reply = format_timed_reply(reply, time.monotonic() - started,
+                                   chat.get("model", "qwen"), chat.get("thinking", "off"))
         send_wechat(db, peer, reply, config["ai_sender_id"], config=config)
-        LOG.info("group visual reply verified peer=%s seq=%s chars=%s",
-                 peer, msg.get("sort_seq"), len(reply))
+        LOG.info("group visual reply verified peer=%s seq=%s source_seq=%s chars=%s",
+                 peer, msg.get("sort_seq"), visual_msg.get("sort_seq"), len(reply))
         return
     action = classify_message(
         {"type": "文本", "content": request_text, "sender_id": 999999},
@@ -1092,11 +1377,16 @@ def process_group_task(db, config: dict, state: dict, task: dict) -> None:
     elif action and action[0] == "reset":
         reply = reset_session_reply(chat)
         save_state(STATE_PATH, state)
+    elif action and action[0] == "clear":
+        reply = clear_chat_memory(state, peer, chat)
+        save_state(STATE_PATH, state)
     else:
         if is_group_summary_request(request_text):
             history = db.get_messages(
                 peer, limit=int(config.get("group_history_limit", GROUP_SUMMARY_HISTORY_LIMIT)))
-            prompt = prepare_model_prompt(group_summary_prompt(history, request_text))
+            prompt = prepare_model_prompt(
+                group_summary_prompt(history, request_text, config["ai_sender_id"])
+            )
         else:
             prompt = prepare_model_prompt(request_text)
         reply = sanitize_reply(ask_openclaw(
@@ -1105,7 +1395,7 @@ def process_group_task(db, config: dict, state: dict, task: dict) -> None:
         ))
         maybe_auto_compact(config, peer, chat, time.monotonic() - started,
                            threshold=GROUP_COMPACT_AFTER_SECONDS)
-    if action and action[0] in {"model", "thinking", "help", "compact", "reset"}:
+    if action and action[0] in {"model", "thinking", "help", "compact", "reset", "clear"}:
         final_reply = reply
     elif action and action[0] == "search":
         # Search has two stages (SearXNG retrieval + model synthesis), so expose
@@ -1163,6 +1453,10 @@ def process_new_messages(db, config: dict, state: dict, dry_run: bool = False,
                 mention_names = config.get("group_mention_names") or ["大肥鱼", "DSH20260918"]
                 raw_group_content = str(msg.get("content", ""))
                 group_request = extract_group_mention(raw_group_content, mention_names)
+                quote_request, quote_has_image = extract_group_quote_request(
+                    raw_group_content, mention_names)
+                if group_request is None and quote_request is not None:
+                    group_request = quote_request
                 sender_key = str(msg.get("sender_username") or msg.get("sender_id") or "")
                 pending = chat.get("group_visual_pending")
                 if group_request is None and pending:
@@ -1183,6 +1477,20 @@ def process_new_messages(db, config: dict, state: dict, dry_run: bool = False,
                         chat.pop("group_visual_pending", None)
                         save_state(STATE_PATH, state)
                 if group_request is None:
+                    continue
+                if quote_has_image or is_group_visual_history_request(group_request):
+                    if dry_run:
+                        continue
+                    if group_dispatcher is None:
+                        raise RuntimeError("group dispatcher is required for live processing")
+                    group_dispatcher.enqueue(peer, {
+                        "peer": peer, "msg": dict(msg), "request": group_request,
+                        "reference_latest_visual": True,
+                        "visual_search": group_request.lower().startswith("/search"),
+                    })
+                    total += 1
+                    LOG.info("group visual history request peer=%s seq=%s request=%s",
+                             peer, seq, group_request[:80])
                     continue
                 if is_group_visual_request(group_request) or not group_request:
                     chat["group_visual_pending"] = make_group_visual_pending(
@@ -1225,8 +1533,8 @@ def process_new_messages(db, config: dict, state: dict, dry_run: bool = False,
                         save_state(STATE_PATH, state)
                         LOG.exception("daily help failed peer=%s; next message will retry", peer)
             if kind == "image":
-                if chat["model"] == "deepseek":
-                    reply_parts = ["当前 DeepSeek 模式不支持图片识别，请发送 /qwen 后重试。"]
+                if chat["model"] == "deepseek" and not os.environ.get(str(config.get("deepseek_api_key_env", "DEEPSEEK_API_KEY")), "").strip():
+                    reply_parts = ["DeepSeek V4.1 已支持识图，但本机尚未配置 DEEPSEEK_API_KEY。"]
                 else:
                     image_path = None
                     vision_path = None
@@ -1240,9 +1548,10 @@ def process_new_messages(db, config: dict, state: dict, dry_run: bool = False,
                         media_label = "动画表情" if value == "emoji" else "图片"
                         description = describe_image(
                             vision_path,
-                            f"请客观描述这个{media_label}的主要内容、动作和情绪，"
-                            "并读取清晰可见的文字。只输出简洁描述。",
+                            f"请先客观描述这个{media_label}可见的外形、颜色、结构和文字，再判断主体。"
+                            "不要仅凭模糊轮廓猜测，无法确认时明确说无法确认。只输出简洁事实。",
                             config,
+                            model_alias=chat.get("model", "qwen"),
                         )
                         generation_started = time.monotonic()
                         prompt = prepare_model_prompt(
@@ -1250,11 +1559,12 @@ def process_new_messages(db, config: dict, state: dict, dry_run: bool = False,
                             f"请根据{media_label}内容自然回复用户，不要提及识别流程。"
                         )
                         reply = sanitize_reply(ask_openclaw(
-                            config, peer, "qwen", chat.get("thinking", "off"), prompt,
+                            config, peer, chat.get("model", "qwen"), chat.get("thinking", "off"), prompt,
                             epoch=int(chat.get("session_epoch", 0)),
                         ))
                         reply_parts = prepare_reply_parts(
-                            reply, time.monotonic() - generation_started, "qwen",
+                            compact_visual_reply(reply),
+                            time.monotonic() - generation_started, "qwen",
                             chat.get("thinking", "off"), chat.get("humanized", False),
                             compact=False,
                         )
@@ -1278,20 +1588,53 @@ def process_new_messages(db, config: dict, state: dict, dry_run: bool = False,
             elif kind == "help":
                 reply = render_daily_help()
             elif kind == "search":
-                reply = summarize_search(config, peer, chat, value)
+                if is_quoted_visual_request(msg.get("content", "")):
+                    reply = summarize_quoted_visual_search(db, config, peer, chat, msg, value)
+                else:
+                    reply = summarize_search(config, peer, chat, value)
             elif kind == "compact":
                 reply = compact_session_reply(config, peer, chat)
                 save_state(STATE_PATH, state)
             elif kind == "reset":
                 reply = reset_session_reply(chat)
                 save_state(STATE_PATH, state)
+            elif kind == "clear":
+                reply = clear_chat_memory(state, peer, chat)
+                save_state(STATE_PATH, state)
             elif dry_run:
                 LOG.info("dry-run peer=%s seq=%s model=%s", peer, seq, chat["model"])
                 continue
             else:
+                if is_quoted_visual_request(msg.get("content", "")):
+                    reply = summarize_quoted_visual_reply(db, config, peer, chat, msg, value)
+                    reply = format_timed_reply(reply, time.monotonic() - started,
+                                               chat.get("model", "qwen"), chat.get("thinking", "off"))
+                    reply_parts = [reply]
+                    generation_started = None
+                    # The quoted image was handled as a visual request; do not
+                    # feed the raw XML quote card into the normal chat prompt.
+                    if not dry_run:
+                        try:
+                            send_wechat_sequence(
+                                db, peer, reply_parts, config["ai_sender_id"],
+                                float(config.get("humanized_delay_seconds", 1.0)),
+                                config=config,
+                            )
+                            LOG.info("quoted visual reply verified peer=%s seq=%s model=%s chars=%s",
+                                     peer, seq, chat.get("model", "qwen"), len(reply))
+                        except Exception:
+                            LOG.exception("quoted visual send failed peer=%s seq=%s", peer, seq)
+                    continue
                 generation_started = time.monotonic()
                 compact_prompt = is_short_casual_prompt(value)
-                model_prompt = prepare_model_prompt(value)
+                quoted = extract_quoted_message_text(msg.get("content", ""))
+                if quoted and quoted[1]:
+                    model_prompt = prepare_model_prompt(
+                        f"用户当前问题：{quoted[0]}\n\n用户引用的消息：\n{quoted[1]}\n\n"
+                        "请优先理解并回答被引用的消息；如果引用内容是图片或媒体，说明当前只能依据可见引用信息回答。"
+                    )
+                else:
+                    model_prompt = prepare_model_prompt(value)
                 try:
                     reply = sanitize_reply(ask_openclaw(
                         config, peer, chat["model"], chat.get("thinking", "off"), model_prompt,
@@ -1312,7 +1655,7 @@ def process_new_messages(db, config: dict, state: dict, dry_run: bool = False,
                 continue
             delivery_started = time.monotonic()
             try:
-                if kind in ("model", "thinking", "help", "compact", "reset"):
+                if kind in ("model", "thinking", "help", "compact", "reset", "clear"):
                     reply_parts = [reply]
                 elif kind == "search":
                     reply_parts = [format_timed_reply(
@@ -1373,6 +1716,24 @@ def install_crash_logging() -> None:
     threading.excepthook = log_thread_unhandled
 
 
+def acquire_instance_lock() -> bool:
+    """Allow only one bridge process to access the shared database cache."""
+    global INSTANCE_LOCK_HANDLE
+    INSTANCE_LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
+    handle = open(INSTANCE_LOCK_PATH, "a+b")
+    try:
+        handle.seek(0)
+        handle.write(b"0")
+        handle.flush()
+        handle.seek(0)
+        msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+    except (OSError, IOError):
+        handle.close()
+        return False
+    INSTANCE_LOCK_HANDLE = handle
+    return True
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--dry-run", action="store_true")
@@ -1380,6 +1741,9 @@ def main() -> int:
     parser.add_argument("--once", action="store_true")
     args = parser.parse_args()
     config = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+    if not acquire_instance_lock():
+        LOG.warning("another bridge instance already owns the database lock; exiting")
+        return 0
     RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
     show_console_window(config)
     LOG.setLevel(logging.INFO)
@@ -1439,9 +1803,11 @@ def main() -> int:
     for chat in state.get("chats", {}).values():
         chat.setdefault("humanized", True)
     save_state(STATE_PATH, state)
-    LOG.info("bridge ready direct_chats=%s", len(state["chats"]))
+    LOG.info("bridge ready direct_chats=%s deepseek_key=%s", len(state["chats"]),
+             bool(os.environ.get(str(config.get("deepseek_api_key_env", "DEEPSEEK_API_KEY")), "").strip()))
     group_dbs = {}
     group_db_lock = threading.Lock()
+    db_access_lock = threading.RLock()
 
     def handle_group_task(task: dict) -> None:
         peer = task["peer"]
@@ -1455,8 +1821,31 @@ def main() -> int:
                     workdir=str(RUNTIME_DIR / f"group_db_{digest}"),
                 )
                 group_dbs[peer] = group_db
+        timed_out = threading.Event()
+        finished = threading.Event()
+
+        def timeout_notice() -> None:
+            if finished.is_set():
+                return
+            timed_out.set()
+            try:
+                send_wechat(group_db, peer,
+                            "图片识别超时，请稍后重发。",
+                            config["ai_sender_id"], config=config)
+                LOG.warning("group visual task timeout peer=%s seq=%s",
+                            peer, task["msg"].get("sort_seq"))
+            except Exception:
+                LOG.exception("group timeout notice failed peer=%s", peer)
+
+        timer = threading.Timer(float(config.get("group_visual_timeout_seconds", 45)),
+                                timeout_notice)
+        timer.daemon = True
+        timer.start()
         try:
-            process_group_task(group_db, config, state, task)
+            # Main polling and group workers share the wechatauto cache layer.
+            # Serialize DB access to avoid concurrent tmp->db replacements.
+            with db_access_lock:
+                process_group_task(group_db, config, state, task)
         except Exception:
             LOG.exception("group reply failed peer=%s seq=%s",
                           peer, task["msg"].get("sort_seq"))
@@ -1464,6 +1853,9 @@ def main() -> int:
                 notify_group_failure(group_db, config, task)
             except Exception:
                 LOG.exception("group failure notice could not be sent peer=%s", peer)
+        finally:
+            finished.set()
+            timer.cancel()
 
     group_dispatcher = GroupTaskDispatcher(handle_group_task)
     was_offline = True
@@ -1473,14 +1865,16 @@ def main() -> int:
                 if not args.dry_run and not use_hook_transport(config):
                     find_ai_window(state["own_user"])
                 if was_offline:
-                    notices = process_offline_messages(db, config, state, dry_run=args.dry_run)
+                    with db_access_lock:
+                        notices = process_offline_messages(db, config, state, dry_run=args.dry_run)
                     LOG.info("online recovery complete notices=%s", notices)
                     was_offline = False
                 else:
-                    process_new_messages(
-                        db, config, state, dry_run=args.dry_run,
-                        group_dispatcher=group_dispatcher,
-                    )
+                    with db_access_lock:
+                        process_new_messages(
+                            db, config, state, dry_run=args.dry_run,
+                            group_dispatcher=group_dispatcher,
+                        )
             except Exception:
                 was_offline = True
                 LOG.exception("poll failed; retrying")

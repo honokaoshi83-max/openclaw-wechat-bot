@@ -15,7 +15,8 @@ This project uses a dedicated WeChat account for private and group conversations
 - 私聊和群聊回复 / Private and group chat replies
 - DeepSeek 与本地 Qwen 切换 / Switch between DeepSeek and local Qwen
 - `/fast` 和 `/think` 模式 / Fast and thinking modes
-- 图片、表情包、GIF 识别（Qwen） / Image, emoji, and GIF recognition with Qwen
+- Qwen 低精度图片、表情包、GIF 识别 / Qwen image, emoji, and GIF recognition
+- DeepSeek V4.1 Flash 高准确识图 / DeepSeek V4.1 Flash visual recognition
 - 群聊 `@` 触发和回复时 `@` 实际发送者 / Group mentions and sender mentions
 - 最近群消息总结 / Summarize recent group messages
 - Docker SearXNG 联网搜索 / Web search through Docker SearXNG
@@ -69,6 +70,7 @@ Core components:
 | `/reset` | 重置当前会话上下文 |
 | `/help` | 查看每日公告和帮助 |
 | `/search 关键词` | 联网搜索并归纳 |
+| `/clear` | 清除当前用户或群聊的会话记忆 |
 
 Send these commands in WeChat:
 
@@ -80,6 +82,7 @@ Send these commands in WeChat:
 - `/reset`: start a new session context.
 - `/help`: show the daily help notice.
 - `/search query`: search the web and summarize the results.
+- `/clear`: clear memory for the current private chat or group only.
 
 默认不会输出搜索链接。只有在查询中明确要求“标明链接”“提供来源”或“给出网址”时，才保留来源链接。
 

@@ -109,7 +109,7 @@ class BridgeTests(unittest.TestCase):
             self.assertNotEqual(prepared, source)
             with Image.open(prepared) as image:
                 self.assertEqual(image.format, "PNG")
-                self.assertEqual(image.size, (60, 10))
+                self.assertEqual(image.size, (20, 10))
 
     def test_emoji_cache_is_extracted_without_using_the_wechat_ui(self):
         class EmojiDownloader:
@@ -219,7 +219,7 @@ class BridgeTests(unittest.TestCase):
         morning = datetime(2026, 9, 19, 1, 0, tzinfo=timezone.utc)
         notice = claim(chat, morning)
         self.assertIn("时间：2026年9月19日", notice)
-        self.assertIn("大肥鱼0.3版本", notice)
+        self.assertIn("大肥鱼0.4版本", notice)
         self.assertIn("切换deepseek模型：/deepseek", notice)
         self.assertIn("切换本地模型：/qwen", notice)
         self.assertIn("本地模型进入思考模式：/think", notice)
@@ -228,9 +228,9 @@ class BridgeTests(unittest.TestCase):
 
     def test_daily_help_notice_has_version_02_and_media_capabilities(self):
         notice = bridge.render_daily_help(datetime(2026, 9, 20, 1, 0, tzinfo=timezone.utc))
-        self.assertIn("大肥鱼0.3版本", notice)
-        self.assertIn("已支持图像识别、表情包识别、GIF识别（0.2版本更新）！", notice)
-        self.assertIn("（图像功能仅支持qwen模型下使用）", notice)
+        self.assertIn("大肥鱼0.4版本", notice)
+        self.assertIn("qwen已支持图像识别、表情包识别、GIF识别（此模式为低精确识图）。（0.2版本更新）", notice)
+        self.assertIn("DeepSeek已支持识图（此模式下为高准确识图）。（0.4版本更新）", notice)
         self.assertIn("🐋🐋🐋🐋🐋🐋🐋🐋🐋🐋🐋", notice)
         self.assertIn("/compact", notice)
         self.assertIn("/reset", notice)

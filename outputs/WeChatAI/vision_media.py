@@ -221,7 +221,9 @@ def prepare_vision_image(path: Path, temp_dir: Path) -> Path:
             frame_count = int(getattr(image, "n_frames", 1))
             if frame_count <= 1:
                 return source
-            indices = sorted(set((0, frame_count // 2, frame_count - 1)))
+            # A single representative frame keeps sticker recognition fast.
+            # The caller can opt into a three-frame contact sheet when needed.
+            indices = [0] if frame_count > 1 else [0]
             frames = []
             for index in indices:
                 image.seek(index)
