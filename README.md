@@ -116,6 +116,149 @@ work/searxng/settings.yml
 
 Make sure the OpenClaw Gateway is running and that the `wechat-public` agent allows `web_search` and `web_fetch`.
 
+## 部署步骤 | Deployment Guide
+
+### A. 部署 Docker SearXNG | Deploy Docker SearXNG
+
+1. 安装并启动 Docker Desktop。
+2. 确认 Docker 引擎处于运行状态。
+3. 使用 `work/searxng/settings.yml` 创建 SearXNG 配置。
+4. 启动容器并映射端口：
+
+```powershell
+docker run -d --name openclaw-searxng `
+  -p 127.0.0.1:8888:8080 `
+  -v "${PWD}\work\searxng\settings.yml:/etc/searxng/settings.yml:ro" `
+  searxng/searxng:latest
+```
+
+5. 验证服务：
+
+```powershell
+Invoke-RestMethod "http://127.0.0.1:8888/search?q=test&format=json"
+```
+
+如果容器已经存在，使用 `docker start openclaw-searxng`，不要重复创建。
+
+If the container already exists, use `docker start openclaw-searxng` instead of creating it again.
+
+### B. 部署 OpenClaw Gateway | Deploy OpenClaw Gateway
+
+1. 在 WSL 中安装 Node.js 和 OpenClaw。
+2. 创建或确认 `wechat-public` 智能体。
+3. 配置 DeepSeek API 凭据（如使用 DeepSeek）。
+4. 配置本地搜索地址和工具权限：
+
+```json
+{
+  "tools": {
+    "web": {
+      "search": {
+        "enabled": true,
+        "provider": "searxng"
+      }
+    }
+  },
+  "agents": {
+    "entries": {
+      "wechat-public": {
+        "tools": {
+          "profile": "coding",
+          "allow": ["web_search", "web_fetch"]
+        }
+      }
+    }
+  }
+}
+```
+
+5. 将 SearXNG 地址配置为 `http://127.0.0.1:8888`。
+6. 验证并重启：
+
+```bash
+openclaw config validate
+openclaw gateway restart
+curl http://127.0.0.1:18789/health
+```
+
+健康检查返回 `status: live` 后再继续下一步。
+
+### C. 部署本地 Qwen | Deploy local Qwen
+
+1. 安装 llama.cpp server。
+2. 准备支持文本和图像输入的 Qwen GGUF 模型。
+3. 启动 OpenAI 兼容接口，默认地址：
+
+```text
+http://127.0.0.1:8080/v1
+```
+
+4. 在 OpenClaw 模型提供商中填写 llama.cpp 的 `baseUrl`、模型 ID、上下文长度和输出上限。
+5. 先用 OpenClaw 或 curl 做一次本地文本测试，再启动微信桥接。
+
+The local Qwen endpoint must be reachable before `/qwen` or image recognition can work.
+
+### D. 配置微信 Hook | Configure WeChat Hook
+
+1. 手动登录 AI 微信账号。
+2. 启动与当前微信版本匹配的 WeChat Hook 服务。
+3. 确认发送接口可访问：
+
+```text
+http://127.0.0.1:30001/SendTextMsg
+```
+
+4. 确认 Hook 读取到当前 AI 微信账号，并记录账号 wxid。
+
+The Hook process and WeChat account must belong to the same desktop session.
+
+### E. 配置并启动桥接 | Configure and Start the Bridge
+
+复制示例配置并按本机情况修改：
+
+```text
+outputs/WeChatAI/config.json
+```
+
+至少需要确认：
+
+```json
+{
+  "ai_account_dir": "你的 AI 微信账号目录",
+  "main_peer": "主微信 wxid",
+  "send_mode": "hook",
+  "hook_url": "http://127.0.0.1:30001",
+  "agent": "wechat-public",
+  "searxng_url": "http://127.0.0.1:8888"
+}
+```
+
+启动：
+
+```powershell
+.\outputs\WeChatAI\start.ps1
+```
+
+检查日志：
+
+```powershell
+Get-Content ".\work\wechat_ai_bridge_state\bridge.log" -Tail 30
+```
+
+看到 `bridge ready` 和 `online recovery complete` 后，发送一条普通文字测试，再测试 `/help` 和 `/search 测试关键词`。
+
+### F. 开机启动 | Start at Boot
+
+推荐只设置后台服务自启：
+
+- Docker Desktop：系统登录后自动启动；
+- OpenClaw Gateway：使用 systemd user service；
+- llama.cpp：使用隐藏启动脚本或任务计划程序；
+- 微信：手动登录 AI 账号；
+- WeChat Bridge：使用任务计划程序，在微信和 Hook 就绪后启动 `start.ps1`。
+
+Do not store API keys or WeChat credentials in the startup scripts. Keep them in local-only configuration or the system credential store.
+
 ### 4. 登录微信并启动桥接 | Log in to WeChat and start the bridge
 
 微信账号需要手动登录，然后在项目目录运行：
