@@ -729,6 +729,10 @@ class BridgeTests(unittest.TestCase):
         self.assertTrue(bridge.should_compact_before_turn(23000, 32768, 0.70))
         self.assertFalse(bridge.should_compact_before_turn(0, 32768, 0.70))
 
+    def test_sanitize_reply_removes_openclaw_truncation_notice(self):
+        text = "这是已经生成的内容。\n\n⚠️ Reply truncated at the model's output token limit. The text above is partial — ask to continue it."
+        self.assertEqual(bridge.sanitize_reply(text), "这是已经生成的内容。")
+
 
     def test_ask_openclaw_accepts_a_session_epoch(self):
         import inspect

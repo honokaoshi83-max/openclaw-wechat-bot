@@ -85,6 +85,11 @@ INTERNAL_CONTEXT_MARKER = re.compile(
     r"(?im)(?:<!--|--)?\s*(?:project:\s*path:|observed:\s*\d{4}-\d{2}-\d{2}|assistantTexts\b)"
 )
 INTERNAL_CONTEXT_FALLBACK = "刚才回复格式出了点问题，你再说一次。"
+MODEL_TRUNCATION_NOTICE = re.compile(
+    r"\s*⚠️?\s*Reply truncated at the model's output token limit\."
+    r"\s*The text above is partial\s*[—-]\s*ask to continue it\.?.*$",
+    re.S | re.I,
+)
 # Windows caps a process command line near 32k characters; WSL/OpenClaw receives the
 # whole prompt as an argument, so group transcripts must stay well below that.
 GROUP_SUMMARY_HISTORY_LIMIT = 70
@@ -867,6 +872,7 @@ def prepare_model_prompt(prompt: str) -> str:
 def sanitize_reply(text: str) -> str:
     """Remove leaked OpenClaw workspace/session context before sending to WeChat."""
     clean = str(text or "").strip()
+    clean = MODEL_TRUNCATION_NOTICE.sub("", clean).strip()
     match = INTERNAL_CONTEXT_MARKER.search(clean)
     if match:
         clean = clean[:match.start()].rstrip()
