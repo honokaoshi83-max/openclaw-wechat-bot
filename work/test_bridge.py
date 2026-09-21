@@ -76,6 +76,18 @@ class BridgeTests(unittest.TestCase):
         self.assertTrue(is_group_summary_request("总结对话"))
         self.assertFalse(is_group_summary_request("总结一下群聊"))
 
+    def test_group_quote_text_is_extracted_and_comment_intent_detected(self):
+        content = ('wxid_sender:\n<msg><appmsg><title>@大肥鱼 评价一下</title>'
+                   '<refermsg><content>小明：这条消息值得相信吗？</content><type>1</type>'
+                   '</refermsg></appmsg></msg>')
+        self.assertEqual(bridge.extract_group_quote_text(content), '小明：这条消息值得相信吗？')
+        self.assertTrue(bridge.is_group_quote_comment_request('评价一下'))
+        self.assertFalse(bridge.is_group_quote_search_request('评价一下'))
+
+    def test_group_quote_search_intent_detected(self):
+        self.assertTrue(bridge.is_group_quote_search_request('这是真的吗？'))
+        self.assertTrue(bridge.is_group_quote_search_request('帮我核实一下'))
+        self.assertFalse(bridge.is_group_quote_search_request('评论一下'))
     def test_image_messages_are_detected_without_reading_content(self):
         self.assertTrue(is_image_message({"type": "图片", "local_id": 7}))
         self.assertTrue(is_image_message({"local_type": 3, "local_id": 7}))
@@ -798,3 +810,4 @@ class BridgeTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+

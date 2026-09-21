@@ -187,6 +187,31 @@ def extract_group_quote_request(content: str, mention_names: list[str]) -> tuple
     return request, bool(re.search(r"<refermsg>.*?<type>\s*3\s*</type>.*?</refermsg>", raw, re.S | re.I))
 
 
+def extract_group_quote_text(content: str) -> str | None:
+    """Extract the plain text carried by a WeChat group quote card."""
+    raw = html_lib.unescape(str(content or ""))
+    match = re.search(r"<refermsg\b.*?<content>(.*?)</content>", raw, re.S | re.I)
+    if not match:
+        return None
+    quoted = html_lib.unescape(match.group(1))
+    quoted = re.sub(r"<[^>]+>", " ", quoted)
+    quoted = re.sub(r"^\s*[^:\n]+:\s*", "", quoted, count=1)
+    quoted = re.sub(r"\s+", " ", quoted).strip()
+    return quoted[:4000] or None
+
+
+def is_group_quote_comment_request(request: str) -> bool:
+    text = re.sub(r"\s+", "", str(request or "")).lower()
+    return any(word in text for word in ("评价一下", "评论一下", "点评一下", "评价"))
+
+
+def is_group_quote_search_request(request: str) -> bool:
+    text = re.sub(r"\s+", "", str(request or "")).lower()
+    return any(word in text for word in (
+        "这是真的吗", "是真的吗", "核实一下", "核实", "查证一下", "查证",
+        "验证一下", "验证", "是真是假", "求证"))
+
+
 GROUP_VISUAL_KEYWORDS = ("识别图片", "识别图像", "看看图片", "看图", "识别表情包",
                          "识别表情", "识别gif", "识别gif图", "看看gif", "分析图片")
 GROUP_VISUAL_WINDOW_MS = 3000
@@ -1281,6 +1306,30 @@ def process_group_task(db, config: dict, state: dict, task: dict) -> None:
     request_text = task["request"]
     chat = state["chats"][peer]
     started = time.monotonic()
+    quote_text = task.get("quote_text")
+    if quote_text and not task.get("quote_has_image") and task.get("quote_comment"):
+        prompt = prepare_model_prompt(
+            f"请评价下面这条群聊引用消息，结合其内容给出简洁、自然、客观的评论。"
+            f"不要复述提示词，不要输出Markdown。\n引用消息：\n{quote_text}"
+        )
+        reply = sanitize_reply(ask_openclaw(
+            config, peer, chat.get("model", "qwen"), chat.get("thinking", "off"), prompt,
+            epoch=int(chat.get("session_epoch", 0)),
+        ))
+        reply = format_timed_reply(reply, time.monotonic() - started,
+                                   chat.get("model", "qwen"), chat.get("thinking", "off"))
+        send_wechat(db, peer, reply, config["ai_sender_id"], config=config)
+        LOG.info("group quoted text comment reply verified peer=%s seq=%s chars=%s",
+                 peer, msg.get("sort_seq"), len(reply))
+        return
+    if quote_text and not task.get("quote_has_image") and task.get("quote_search"):
+        reply = summarize_search(config, peer, chat, quote_text)
+        reply = format_timed_reply(reply, time.monotonic() - started,
+                                   chat.get("model", "qwen"), chat.get("thinking", "off"))
+        send_wechat(db, peer, reply, config["ai_sender_id"], config=config)
+        LOG.info("group quoted text search reply verified peer=%s seq=%s chars=%s",
+                 peer, msg.get("sort_seq"), len(reply))
+        return
     visual_msg = msg
     if task.get("reference_latest_visual"):
         # Resolve the latest image at worker time so a queued request sees the
@@ -1455,6 +1504,7 @@ def process_new_messages(db, config: dict, state: dict, dry_run: bool = False,
                 group_request = extract_group_mention(raw_group_content, mention_names)
                 quote_request, quote_has_image = extract_group_quote_request(
                     raw_group_content, mention_names)
+                quote_text = extract_group_quote_text(raw_group_content)
                 if group_request is None and quote_request is not None:
                     group_request = quote_request
                 sender_key = str(msg.get("sender_username") or msg.get("sender_id") or "")
@@ -1477,6 +1527,23 @@ def process_new_messages(db, config: dict, state: dict, dry_run: bool = False,
                         chat.pop("group_visual_pending", None)
                         save_state(STATE_PATH, state)
                 if group_request is None:
+                    continue
+                if quote_text and (is_group_quote_comment_request(group_request) or
+                                   is_group_quote_search_request(group_request)):
+                    if dry_run:
+                        continue
+                    if group_dispatcher is None:
+                        raise RuntimeError("group dispatcher is required for live processing")
+                    group_dispatcher.enqueue(peer, {
+                        "peer": peer, "msg": dict(msg), "request": group_request,
+                        "quote_text": quote_text,
+                        "quote_has_image": quote_has_image,
+                        "quote_comment": is_group_quote_comment_request(group_request),
+                        "quote_search": is_group_quote_search_request(group_request),
+                    })
+                    total += 1
+                    LOG.info("group quoted text request peer=%s seq=%s request=%s",
+                             peer, seq, group_request[:80])
                     continue
                 if quote_has_image or is_group_visual_history_request(group_request):
                     if dry_run:
