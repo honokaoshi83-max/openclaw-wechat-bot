@@ -1044,6 +1044,52 @@ def should_compact_after_turn(elapsed_seconds: float,
     return elapsed_seconds >= threshold
 
 
+def should_compact_before_turn(total_tokens: int, context_tokens: int,
+                               ratio: float = 0.70) -> bool:
+    """Return whether a session is close enough to its context limit to compact."""
+    return total_tokens > 0 and context_tokens > 0 and total_tokens >= context_tokens * ratio
+
+
+def get_openclaw_session_usage(config: dict, peer: str, epoch: int = 0,
+                               timeout: float = 5.0) -> dict | None:
+    """Read the gateway's token counters for one session without failing a turn."""
+    command = [
+        "wsl.exe", "-d", "OpenClawGateway", "-u", "openclaw", "--",
+        "openclaw", "sessions", "--json", "--agent", config["agent"],
+        "--limit", "all",
+    ]
+    try:
+        result = subprocess.run(command, text=True, capture_output=True,
+                                encoding="utf-8", timeout=timeout,
+                                **openclaw_run_options())
+        if result.returncode:
+            return None
+        sessions = json.loads(result.stdout).get("sessions", [])
+        key = openclaw_session_key(config, peer, epoch)
+        return next((item for item in sessions if item.get("key") == key), None)
+    except (OSError, subprocess.SubprocessError, ValueError, TypeError):
+        LOG.debug("session usage lookup failed peer=%s", peer, exc_info=True)
+        return None
+
+
+def maybe_auto_compact_before_turn(config: dict, peer: str, chat: dict) -> None:
+    """Compact a session before inference when its token budget is nearly full."""
+    usage = get_openclaw_session_usage(config, peer, int(chat.get("session_epoch", 0)))
+    if not usage:
+        return
+    context_tokens = int(usage.get("contextTokens") or config.get("qwen_context_tokens", 32768))
+    total_tokens = int(usage.get("totalTokens") or 0)
+    ratio = float(config.get("auto_compact_ratio", 0.70))
+    if not should_compact_before_turn(total_tokens, context_tokens, ratio):
+        return
+    try:
+        info = compact_openclaw_session(config, peer, int(chat.get("session_epoch", 0)))
+        LOG.info("pre-turn automatic compaction peer=%s tokens=%s->%s",
+                 peer, info.get("tokensBefore", total_tokens), info.get("tokensAfter"))
+    except Exception:
+        LOG.warning("pre-turn automatic compaction failed peer=%s", peer, exc_info=True)
+
+
 def maybe_auto_compact(config: dict, peer: str, chat: dict,
                        elapsed_seconds: float,
                        threshold: float = COMPACT_AFTER_SECONDS) -> None:
@@ -1122,6 +1168,7 @@ def apply_windowless_spawn() -> None:
 
 def ask_openclaw(config: dict, peer: str, model_alias: str,
                  thinking_level: str, prompt: str, epoch: int = 0) -> str:
+    maybe_auto_compact_before_turn(config, peer, {"session_epoch": epoch})
     command = build_openclaw_command(config, peer, model_alias, thinking_level, prompt,
                                      epoch=epoch)
     result = subprocess.run(command, text=True, capture_output=True, encoding="utf-8",

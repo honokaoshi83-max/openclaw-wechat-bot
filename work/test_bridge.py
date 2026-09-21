@@ -724,6 +724,11 @@ class BridgeTests(unittest.TestCase):
         self.assertFalse(bridge.should_compact_after_turn(5.0))
         self.assertTrue(bridge.should_compact_after_turn(120.0))
 
+    def test_context_threshold_triggers_before_turn(self):
+        self.assertFalse(bridge.should_compact_before_turn(22000, 32768, 0.70))
+        self.assertTrue(bridge.should_compact_before_turn(23000, 32768, 0.70))
+        self.assertFalse(bridge.should_compact_before_turn(0, 32768, 0.70))
+
 
     def test_ask_openclaw_accepts_a_session_epoch(self):
         import inspect
