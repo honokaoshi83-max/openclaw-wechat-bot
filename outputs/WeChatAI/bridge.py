@@ -132,6 +132,21 @@ def claim_daily_help_notice(chat: dict, now: datetime | None = None) -> str | No
     return render_daily_help(instant)
 
 
+def is_tokyo_quiet_hours(instant: datetime | None = None) -> bool:
+    """Return whether Tokyo time is in the 00:00-08:00 quiet period."""
+    value = instant or datetime.now(TOKYO_TIMEZONE)
+    tokyo = value.astimezone(TOKYO_TIMEZONE)
+    return tokyo.hour < 8
+
+
+def message_tokyo_datetime(msg: dict) -> datetime:
+    """Convert a WeChat sort sequence (Unix milliseconds) to Tokyo time."""
+    seq = int(msg.get("sort_seq") or 0)
+    if seq > 100000000000:
+        return datetime.fromtimestamp(seq / 1000.0, tz=timezone.utc).astimezone(TOKYO_TIMEZONE)
+    return datetime.now(TOKYO_TIMEZONE)
+
+
 def get_foreground_window() -> int:
     """Return the current foreground window without changing desktop focus."""
     try:
@@ -1550,6 +1565,12 @@ def process_new_messages(db, config: dict, state: dict, dry_run: bool = False,
             chat["last_seq"] = seq
             save_state(STATE_PATH, state)
             if group_peer:
+                # Group chats are completely paused during Tokyo quiet hours.
+                # Advance the watermark so these messages are never replayed at 08:00.
+                if is_tokyo_quiet_hours(message_tokyo_datetime(msg)):
+                    LOG.info("quiet-hours group message ignored peer=%s seq=%s",
+                             peer, seq)
+                    continue
                 if int(msg.get("sender_id") or 0) == config["ai_sender_id"]:
                     continue
                 mention_names = config.get("group_mention_names") or ["大肥鱼", "DSH20260918"]
@@ -1629,6 +1650,15 @@ def process_new_messages(db, config: dict, state: dict, dry_run: bool = False,
                     "peer": peer, "msg": dict(msg), "request": group_request,
                 })
                 total += 1
+                continue
+            if is_tokyo_quiet_hours(message_tokyo_datetime(msg)):
+                quiet_date = message_tokyo_datetime(msg).date().isoformat()
+                if not dry_run and chat.get("quiet_notice_date") != quiet_date:
+                    send_wechat(db, peer, ONLINE_NOTICE, config["ai_sender_id"], config=config)
+                    chat["quiet_notice_date"] = quiet_date
+                    save_state(STATE_PATH, state)
+                    LOG.info("quiet-hours offline notice verified peer=%s date=%s",
+                             peer, quiet_date)
                 continue
             action = classify_incoming_message(msg, config["ai_sender_id"])
             if action is None:

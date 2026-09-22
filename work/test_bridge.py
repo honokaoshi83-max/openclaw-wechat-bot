@@ -404,6 +404,14 @@ class BridgeTests(unittest.TestCase):
         self.assertEqual(plan_offline_batch([NoContentAccess(sort_seq=104, sender_id=1)], 103, 1),
                          (104, False))
 
+    def test_tokyo_quiet_hours_cover_midnight_to_eight(self):
+        self.assertTrue(bridge.is_tokyo_quiet_hours(datetime(2026, 9, 22, 0, 0,
+                                                             tzinfo=bridge.TOKYO_TIMEZONE)))
+        self.assertTrue(bridge.is_tokyo_quiet_hours(datetime(2026, 9, 22, 7, 59,
+                                                             tzinfo=bridge.TOKYO_TIMEZONE)))
+        self.assertFalse(bridge.is_tokyo_quiet_hours(datetime(2026, 9, 22, 8, 0,
+                                                              tzinfo=bridge.TOKYO_TIMEZONE)))
+
     def test_own_send_confirmation_uses_actual_sender_id(self):
         records = [{"sort_seq": 101, "sender_id": 1, "content": "reply"}]
         self.assertTrue(was_sent(records, 100, 1, "reply"))
