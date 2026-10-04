@@ -1,4 +1,5 @@
 import json
+import os
 import tempfile
 import threading
 import time
@@ -23,6 +24,119 @@ from outputs.WeChatAI.vision_media import (ImageUnavailable, cleanup_image,
 
 
 class BridgeTests(unittest.TestCase):
+    def test_qwen_compacts_before_output_budget_is_starved(self):
+        from unittest.mock import patch
+        with patch.object(bridge, "get_openclaw_session_usage", return_value={
+                "totalTokens": 22156, "contextTokens": 32768}), \
+                patch.object(bridge, "compact_openclaw_session", return_value={}) as compact:
+            bridge.maybe_auto_compact_before_turn({"auto_compact_ratio": .7},
+                                                  "wxid_one", {"model": "qwen"})
+        compact.assert_called_once()
+
+    def test_search_retains_conversation_peer_and_epoch_for_followups(self):
+        from unittest.mock import patch, MagicMock
+        response = MagicMock()
+        response.__enter__.return_value.read.return_value = json.dumps({
+            "results": [{"title": "赛事", "content": "两小分由甲队拿到"}]
+        }).encode()
+        with patch.object(bridge.urllib.request, "urlopen", return_value=response), \
+                patch.object(bridge, "ask_openclaw", return_value="甲队") as ask:
+            bridge.summarize_search({"initial_model": "qwen", "session_key_prefix": "test"}, "wxid_one",
+                                    {"model": "qwen", "session_epoch": 7}, "赛事成绩")
+        self.assertEqual(ask.call_args.args[1], "wxid_one")
+        self.assertEqual(ask.call_args.kwargs["epoch"], 7)
+        self.assertFalse(ask.call_args.kwargs["auto_network"])
+
+    def test_current_fact_followups_do_not_require_explicit_date(self):
+        for prompt in ("那推测一下BLG第一轮都会遇见哪些对手", "BLG首轮对手是谁",
+                       "iPhone价格是多少", "千问发布了什么新版本", "东京天气怎么样"):
+            self.assertTrue(bridge.should_auto_search(prompt), prompt)
+        for prompt in ("第一轮面试该怎么准备", "为什么天气会变冷", "解释版本控制的原理"):
+            self.assertFalse(bridge.should_auto_search(prompt), prompt)
+
+    def test_group_natural_search_footer_keeps_sender_mention_and_single_reply(self):
+        from unittest.mock import patch
+        peer = "room@chatroom"
+        state = {"chats": {peer: {"model": "qwen", "thinking": "off"}}}
+        task = {"peer": peer, "request": "2026英雄联盟S赛什么时候开始？",
+                "msg": {"sender_username": "wxid_user", "content": "wxid_user:\n@大肥鱼 问题"}}
+        with patch.object(bridge, "ask_openclaw", return_value=bridge.ModelReply("日期已核实。", True)), \
+                patch.object(bridge, "maybe_auto_compact"), \
+                patch.object(bridge, "resolve_group_sender_name", return_value="小明"), \
+                patch.object(bridge, "send_wechat") as send:
+            bridge.process_group_task(object(), {"ai_sender_id": 1}, state, task)
+        send.assert_called_once()
+        self.assertIn("已联网", send.call_args.args[2])
+        self.assertEqual(send.call_args.kwargs["at_name"], "小明")
+
+    def test_automatic_search_routes_current_facts_not_creative_requests(self):
+        for prompt in ("2026英雄联盟S赛什么时候开始？", "SearXNG目前的官方安装说明在哪里？",
+                       "现在iPhone价格是多少", "LPL昨天谁赢了？"):
+            self.assertTrue(bridge.should_auto_search(prompt), prompt)
+        for prompt in ("你好", "帮我翻译：2026英雄联盟S赛什么时候开始？",
+                       "写一篇关于最新新闻的小说", "我今天有点难过", "解释一下光合作用"):
+            self.assertFalse(bridge.should_auto_search(prompt), prompt)
+
+    def test_qwen_automatic_search_runs_retrieval_before_model(self):
+        from unittest.mock import patch
+        with patch.object(bridge, "summarize_search", return_value="答案") as search:
+            reply = bridge.ask_openclaw({}, "wxid_user", "qwen", "off",
+                                       bridge.prepare_model_prompt("2026英雄联盟S赛什么时候开始？"))
+        self.assertEqual(reply, "答案")
+        self.assertEqual(search.call_args.args[3], "2026英雄联盟S赛什么时候开始？")
+
+    def test_public_webpage_reader_rejects_local_addresses(self):
+        for url in ("file:///etc/passwd", "http://127.0.0.1:8080/", "http://localhost/"):
+            with self.assertRaises(ValueError):
+                bridge.fetch_public_page(url)
+
+    def test_network_footer_requires_successful_web_tool(self):
+        data = {"status": "ok", "result": {"payloads": [{"text": "事实已核实。"}],
+                "meta": {"agentMeta": {"terminalReceipt": {
+                    "successfulToolNames": ["web_fetch"]}}}}}
+        reply = bridge.sanitize_reply(bridge.extract_reply(data))
+        parts = bridge.prepare_reply_parts(reply, 3.2, "qwen", "off", True)
+        self.assertIn("已联网", parts[-1])
+        ordinary = bridge.extract_reply({"status": "ok", "result": {
+            "payloads": [{"text": "我已经联网搜索。"}], "meta": {
+                "agentMeta": {"terminalReceipt": {"successfulToolNames": []}},
+                "toolSummary": {"tools": ["web_search"], "failures": 1}}}})
+        self.assertNotIn("已联网", bridge.format_timed_reply(ordinary, 1, "deepseek", "off"))
+
+    def test_network_metadata_survives_search_and_visual_cleanup(self):
+        reply = bridge.ModelReply("**联网结果**", networked=True)
+        for clean in (bridge.polish_search_reply(reply), bridge.compact_visual_reply(reply)):
+            self.assertIn("已联网", bridge.format_timed_reply(clean, 2, "deepseek", "off"))
+        self.assertNotIn("已联网", bridge.format_timed_reply("普通回复", 1, "qwen", "off"))
+
+    def test_natural_network_policy_has_date_tool_rules_and_link_preference(self):
+        prompt = bridge.prepare_model_prompt("2026英雄联盟S赛什么时候开始？")
+        self.assertIn("web_search", prompt)
+        self.assertIn("web_fetch", prompt)
+        self.assertIn("当前日期", prompt)
+        self.assertIn("闲聊", prompt)
+        self.assertIn("2", prompt)
+        self.assertIn("链接", prompt)
+
+    def test_image_edit_outbox_prunes_only_expired_bridge_pngs(self):
+        with tempfile.TemporaryDirectory() as temp:
+            outbox = Path(temp)
+            old = outbox / ("a" * 32 + ".png")
+            recent = outbox / ("b" * 32 + ".png")
+            unrelated = outbox / "keep-this.png"
+            for path in (old, recent, unrelated):
+                path.write_bytes(b"image")
+            old_time = time.time() - 120
+            os.utime(old, (old_time, old_time))
+            os.utime(unrelated, (old_time, old_time))
+
+            removed = bridge.prune_image_edit_outbox(outbox, max_age_seconds=60)
+
+            self.assertEqual(removed, 1)
+            self.assertFalse(old.exists())
+            self.assertTrue(recent.exists())
+            self.assertTrue(unrelated.exists())
+
     def test_group_dispatcher_preserves_order_within_one_group(self):
         seen = []
         done = threading.Event()
@@ -108,6 +222,78 @@ class BridgeTests(unittest.TestCase):
         )
         self.assertIsNone(classify_incoming_message(
             {"type": "动画表情", "local_type": 47, "sender_id": 1}, 1))
+
+    def test_sticker_followup_requires_same_sender_and_three_second_window(self):
+        text = {"sort_seq": 10000, "sender_id": 4, "sender_username": "wxid_a",
+                "type": "文本", "content": "台风不断"}
+        sticker = {"sort_seq": 12999, "sender_id": 4, "sender_username": "wxid_a",
+                   "type": "动画表情", "local_type": 47}
+        self.assertTrue(bridge.is_sticker_followup(text, sticker))
+        self.assertFalse(bridge.is_sticker_followup(
+            text, {**sticker, "sender_id": 5, "sender_username": "wxid_b"}))
+        self.assertFalse(bridge.is_sticker_followup(
+            text, {**sticker, "sort_seq": 13001}))
+        self.assertFalse(bridge.is_sticker_followup(
+            text, {**sticker, "type": "图片", "local_type": 3}))
+
+    def test_sticker_context_prompt_is_limited_to_stickers(self):
+        prompt = bridge.sticker_context_prompt("台风不断", "悲伤的猫，文字写着悲伤")
+        self.assertIn("台风不断", prompt)
+        self.assertIn("情绪或语气补充", prompt)
+        self.assertIn("悲伤的猫", prompt)
+        image_prompt = bridge.visual_reply_prompt("图片", "台风不断", "一把伞")
+        self.assertNotIn("用户先发送了文字", image_prompt)
+
+    def test_private_text_and_following_sticker_produce_one_contextual_reply(self):
+        from unittest.mock import patch
+
+        peer = "wxid_sticker_user"
+        base = int(datetime(2026, 9, 23, 10, 0,
+                            tzinfo=bridge.TOKYO_TIMEZONE).timestamp() * 1000)
+        text = {"sort_seq": base, "sender_id": 2, "sender_username": peer,
+                "local_id": 10, "type": "文本", "content": "台风不断"}
+        sticker = {"sort_seq": base + 1200, "sender_id": 2,
+                   "sender_username": peer, "local_id": 11,
+                   "type": "动画表情", "local_type": 47, "content": "[动画表情]"}
+
+        class FakeDB:
+            def get_sessions(self, limit):
+                return [{"username": peer}]
+
+            def get_new_messages(self, requested_peer, since_seq, limit):
+                if requested_peer != peer:
+                    return []
+                return [item for item in (text, sticker)
+                        if item["sort_seq"] > since_seq][:limit]
+
+        prompts = []
+        chat = {"last_seq": 0, "model": "qwen", "thinking": "off",
+                "humanized": False, "daily_help_date": "2026-09-23"}
+        state = {"own_user": "wxid_ai", "activated_at": 0, "chats": {peer: chat}}
+        config = {"send_mode": "hook", "ai_sender_id": 1,
+                  "initial_model": "qwen", "agent": "wechat-public",
+                  "session_key_prefix": "wechat-test",
+                  "models": {"qwen": "llama-cpp/example"},
+                  "humanized_delay_seconds": 0}
+
+        with patch.object(bridge, "save_state"), \
+                patch.object(bridge, "extract_visual", return_value=Path("sticker.gif")), \
+                patch.object(bridge, "prepare_vision_image", return_value=Path("sticker.png")), \
+                patch.object(bridge, "describe_image", return_value="悲伤的猫"), \
+                patch.object(bridge, "ask_openclaw",
+                             side_effect=lambda *args, **kwargs: prompts.append(args[-1]) or "懂了。"), \
+                patch.object(bridge, "send_wechat_sequence") as send, \
+                patch.object(bridge, "cleanup_image"), \
+                patch.object(bridge, "maybe_auto_compact_before_turn"), \
+                patch.object(bridge, "maybe_auto_compact"):
+            bridge.process_new_messages(FakeDB(), config, state)
+
+        self.assertEqual(len(prompts), 1)
+        self.assertIn("台风不断", prompts[0])
+        self.assertIn("悲伤的猫", prompts[0])
+        self.assertIn("情绪或语气补充", prompts[0])
+        send.assert_called_once()
+        self.assertEqual(chat["last_seq"], sticker["sort_seq"])
 
     def test_animated_gif_is_reduced_to_a_three_frame_contact_sheet(self):
         from PIL import Image
@@ -232,8 +418,9 @@ class BridgeTests(unittest.TestCase):
         notice = claim(chat, morning)
         self.assertIn("时间：2026年9月19日", notice)
         self.assertIn("大肥鱼0.4版本", notice)
-        self.assertIn("切换deepseek模型：/deepseek", notice)
-        self.assertIn("切换本地模型：/qwen", notice)
+        self.assertIn("\u5207\u6362DeepSeek\u6a21\u578b\uff1a\u5207\u6362\u5927\u80a5\u9c7c", notice)
+        self.assertIn("\u5207\u6362\u5343\u95ee\u6a21\u578b\uff1a\u5207\u6362\u5343\u95ee", notice)
+        self.assertIn("\u641c\u7d22\u5173\u952e\u8bcd", notice)
         self.assertIn("本地模型进入思考模式：/think", notice)
         self.assertIn("本地模型进入快速模式：/fast", notice)
         self.assertIsNone(claim(chat, morning))
@@ -287,6 +474,37 @@ class BridgeTests(unittest.TestCase):
         self.assertFalse(bridge.search_requests_links("英雄联盟最新赛况"))
         self.assertTrue(bridge.search_requests_links("英雄联盟最新赛况，标明链接"))
 
+    def test_natural_language_search_requests_are_explicit_and_preserve_query(self):
+        base = {"sender_id": 2, "type": "\u6587\u672c"}
+        self.assertEqual(bridge.classify_message({**base, "content": "\u641c\u7d22 2026 LPL \u9009\u62d4\u8d5b\u7ed3\u679c"}, 1),
+                         ("search", "2026 LPL \u9009\u62d4\u8d5b\u7ed3\u679c"))
+        self.assertEqual(bridge.classify_message({**base, "content": "\u5e2e\u6211\u6838\u5b9e\u4e00\u4e0b\uff1aLPL\u9009\u62d4\u8d5b\u7ed3\u675f\u4e86\u5417\uff1f"}, 1),
+                         ("search", "LPL\u9009\u62d4\u8d5b\u7ed3\u675f\u4e86\u5417\uff1f"))
+        self.assertEqual(bridge.classify_message({**base, "content": "\u6211\u521a\u624d\u641c\u7d22\u4e86\u4e00\u4e0b\u8fd9\u4e2a\u95ee\u9898"}, 1),
+                         ("prompt", "\u6211\u521a\u624d\u641c\u7d22\u4e86\u4e00\u4e0b\u8fd9\u4e2a\u95ee\u9898"))
+
+    def test_chinese_model_switch_supports_followup_question_and_legacy_aliases(self):
+        base = {"sender_id": 2, "type": "\u6587\u672c"}
+        self.assertEqual(bridge.classify_message({**base, "content": "\u5207\u6362\u5927\u80a5\u9c7c"}, 1),
+                         ("model", "deepseek"))
+        self.assertEqual(bridge.classify_message({**base, "content": "\u5207\u6362\u5343\u95ee"}, 1),
+                         ("model", "qwen"))
+        self.assertEqual(bridge.classify_message({**base, "content": "\u5207\u6362\u5927\u80a5\u9c7c\uff0c\u89e3\u91ca\u4e00\u4e0b\u8fd9\u4e2a\u9519\u8bef"}, 1),
+                         ("switch_prompt", ("deepseek", "\u89e3\u91ca\u4e00\u4e0b\u8fd9\u4e2a\u9519\u8bef")))
+        self.assertEqual(bridge.classify_message({**base, "content": "\u5207\u6362\u5343\u95ee \u5e2e\u6211\u603b\u7ed3\u8fd9\u6bb5\u6587\u5b57"}, 1),
+                         ("switch_prompt", ("qwen", "\u5e2e\u6211\u603b\u7ed3\u8fd9\u6bb5\u6587\u5b57")))
+        self.assertEqual(bridge.classify_message({**base, "content": "/deepseek"}, 1),
+                         ("model", "deepseek"))
+        self.assertEqual(bridge.classify_message({**base, "content": "/qwen"}, 1),
+                         ("model", "qwen"))
+
+    def test_help_uses_simplified_chinese_switch_and_search_instructions(self):
+        help_text = bridge.render_daily_help(datetime(2026, 9, 20, tzinfo=timezone.utc))
+        self.assertIn("\u5207\u6362\u5927\u80a5\u9c7c", help_text)
+        self.assertIn("\u5207\u6362\u5343\u95ee", help_text)
+        self.assertIn("\u641c\u7d22\u5173\u952e\u8bcd", help_text)
+
+
     def test_daily_help_notice_state_survives_round_trip(self):
         claim = getattr(bridge, "claim_daily_help_notice", None)
         self.assertIsNotNone(claim)
@@ -313,6 +531,60 @@ class BridgeTests(unittest.TestCase):
         base = {"username": "wxid_main", "sender_id": 4, "type": "文本"}
         self.assertEqual(classify_message({**base, "content": "/qwen"}, 1), ("model", "qwen"))
         self.assertEqual(classify_message({**base, "content": "/deepseek"}, 1), ("model", "deepseek"))
+
+    def test_private_switch_with_followup_uses_new_model_for_answer(self):
+        from unittest.mock import patch
+
+        peer = "wxid_user"
+        msg = {"username": peer, "sender_id": 2, "type": "文本",
+               "content": "切换大肥鱼，解释一下这个错误", "sort_seq": 1}
+
+        class FakeDB:
+            def get_sessions(self, limit):
+                return [{"username": peer}]
+
+            def get_new_messages(self, requested_peer, since_seq, limit):
+                return [msg] if since_seq < msg["sort_seq"] else []
+
+        chat = {"last_seq": 0, "model": "qwen", "thinking": "off",
+                "humanized": False, "daily_help_date": "2026-10-04"}
+        state = {"own_user": "wxid_ai", "activated_at": 0, "chats": {peer: chat}}
+        config = {"ai_sender_id": 1, "initial_model": "qwen", "send_mode": "hook",
+                  "humanized_delay_seconds": 0, "models": {"qwen": "qwen", "deepseek": "deepseek"}}
+
+        with patch.object(bridge, "save_state"), \
+                patch.object(bridge, "ask_openclaw", return_value="这是解释。") as ask, \
+                patch.object(bridge, "send_wechat_sequence"):
+            count = bridge.process_new_messages(FakeDB(), config, state)
+
+        self.assertEqual(count, 1)
+        self.assertEqual(chat["model"], "deepseek")
+        self.assertEqual(ask.call_args.args[2], "deepseek")
+        self.assertIn("解释一下这个错误", ask.call_args.args[4])
+
+    def test_group_switch_with_followup_uses_new_model_for_answer(self):
+        from unittest.mock import patch
+
+        peer = "room@chatroom"
+        chat = {"model": "qwen", "thinking": "off", "session_epoch": 0}
+        state = {"chats": {peer: chat}}
+        task = {"peer": peer,
+                "msg": {"sender_username": "wxid_user", "sender_id": 2,
+                        "content": "wxid_user:\n@大肥鱼 切换大肥鱼，解释一下这个错误"},
+                "request": "切换大肥鱼，解释一下这个错误"}
+
+        class FakeDB:
+            def get_group_members(self, group):
+                return [{"username": "wxid_user", "nick_name": "小明"}]
+
+        with patch.object(bridge, "save_state"), \
+                patch.object(bridge, "ask_openclaw", return_value="这是解释。") as ask, \
+                patch.object(bridge, "send_wechat"):
+            bridge.process_group_task(FakeDB(), {"ai_sender_id": 1}, state, task)
+
+        self.assertEqual(chat["model"], "deepseek")
+        self.assertEqual(ask.call_args.args[2], "deepseek")
+        self.assertIn("解释一下这个错误", ask.call_args.args[4])
 
     def test_qwen_thinking_commands_are_local(self):
         base = {"username": "wxid_main", "sender_id": 4, "type": "文本"}
@@ -526,11 +798,186 @@ class BridgeTests(unittest.TestCase):
         self.assertEqual(endpoint, "http://127.0.0.1:30001/SendTextMsg")
         self.assertEqual(payload, {"wxidorgid": "wxid_main", "msg": "你好"})
 
+    def test_hook_transport_builds_local_image_send_request(self):
+        build_request = getattr(bridge, "build_hook_image_request", None)
+        self.assertIsNotNone(build_request)
+        endpoint, payload = build_request(
+            {"hook_url": "http://127.0.0.1:30001"}, "room@chatroom", r"D:\outbox\edited.png"
+        )
+        self.assertEqual(endpoint, "http://127.0.0.1:30001/SendImgMsg")
+        self.assertEqual(payload, {"wxidorgid": "room@chatroom", "path": r"D:\outbox\edited.png"})
+
+    def test_group_image_edit_request_collects_requirement_and_unmentioned_image(self):
+        from datetime import datetime
+        from unittest.mock import patch
+
+        peer = "room@chatroom"
+        base = int(datetime(2026, 9, 23, 10, 0, tzinfo=bridge.TOKYO_TIMEZONE).timestamp() * 1000)
+        messages = [
+            {"sort_seq": base, "sender_id": 2, "sender_username": "wxid_user",
+             "type": "文本", "content": "wxid_user:\n@大肥鱼\u2005帮我修图"},
+            {"sort_seq": base + 1000, "sender_id": 2, "sender_username": "wxid_user",
+             "type": "文本", "content": "wxid_user:\n把背景改成海边"},
+            {"sort_seq": base + 2000, "sender_id": 2, "sender_username": "wxid_user",
+             "type": "图片", "local_type": 3, "local_id": 99, "content": "wxid_user:"},
+        ]
+
+        class FakeDB:
+            def get_sessions(self, limit):
+                return [{"username": peer}]
+
+            def get_new_messages(self, requested_peer, since_seq, limit):
+                return [item for item in messages if item["sort_seq"] > since_seq]
+
+            def get_group_members(self, group):
+                return [{"username": "wxid_user", "nick_name": "小明"}]
+
+        class FakeDispatcher:
+            def __init__(self):
+                self.tasks = []
+
+            def enqueue(self, group, task):
+                self.tasks.append((group, task))
+
+        chat = {"last_seq": 0, "model": "qwen", "thinking": "off",
+                "humanized": False, "daily_help_date": "2026-09-23"}
+        state = {"own_user": "wxid_ai", "activated_at": 0, "chats": {peer: chat}}
+        config = {"image_edit_enabled": True, "image_edit_request_timeout_seconds": 300,
+                  "group_mention_names": ["大肥鱼"], "ai_sender_id": 1,
+                  "initial_model": "qwen", "send_mode": "hook"}
+        dispatcher = FakeDispatcher()
+        self.assertEqual(bridge.extract_group_mention(messages[0]["content"], ["大肥鱼"]), "帮我修图")
+
+        with patch.object(bridge, "save_state"), \
+                patch.object(bridge, "send_wechat") as send:
+            count = bridge.process_new_messages(FakeDB(), config, state,
+                                                group_dispatcher=dispatcher)
+
+        self.assertEqual(count, 1, repr(state))
+        self.assertEqual(len(dispatcher.tasks), 1)
+        task = dispatcher.tasks[0][1]
+        self.assertEqual(task["image_edit_task"]["instruction"], "把背景改成海边")
+        self.assertEqual(task["image_edit_task"]["image_message"]["local_id"], 99)
+        self.assertEqual(dispatcher.tasks[0][0], peer)
+        self.assertEqual(send.call_count, 3)
+
+    def test_group_image_edit_is_not_activated_when_disabled(self):
+        from datetime import datetime
+        from unittest.mock import patch
+
+        peer = "room@chatroom"
+        base = int(datetime(2026, 9, 23, 10, 0, tzinfo=bridge.TOKYO_TIMEZONE).timestamp() * 1000)
+        messages = [{"sort_seq": base, "sender_id": 2, "sender_username": "wxid_user",
+                     "type": "\u6587\u672c", "content": "wxid_user:\n@\u5927\u80a5\u9c7c \u5e2e\u6211\u4fee\u56fe"}]
+
+        class FakeDB:
+            def get_sessions(self, limit):
+                return [{"username": peer}]
+
+            def get_new_messages(self, requested_peer, since_seq, limit):
+                return [item for item in messages if item["sort_seq"] > since_seq]
+
+            def get_group_members(self, group):
+                return [{"username": "wxid_user", "nick_name": "\u5c0f\u660e"}]
+
+        class FakeDispatcher:
+            def __init__(self):
+                self.tasks = []
+
+            def enqueue(self, group, task):
+                self.tasks.append((group, task))
+
+        chat = {"last_seq": 0, "model": "qwen", "thinking": "off", "humanized": False,
+                "daily_help_date": "2026-09-23"}
+        state = {"own_user": "wxid_ai", "activated_at": 0, "chats": {peer: chat}}
+        config = {"image_edit_enabled": False, "group_mention_names": ["\u5927\u80a5\u9c7c"],
+                  "ai_sender_id": 1, "initial_model": "qwen", "send_mode": "hook"}
+        dispatcher = FakeDispatcher()
+
+        with patch.object(bridge, "save_state"), \
+                patch.object(bridge, "_send_group_edit_prompt") as edit_notice:
+            count = bridge.process_new_messages(FakeDB(), config, state,
+                                                group_dispatcher=dispatcher)
+
+        self.assertEqual(count, 1)
+        self.assertEqual(dispatcher.tasks, [])
+        edit_notice.assert_called_once()
+        self.assertEqual(edit_notice.call_args.args[4], "本机修图功能已停用。")
+
     def test_hook_transport_is_selected_without_a_window(self):
         use_hook = getattr(bridge, "use_hook_transport", None)
         self.assertIsNotNone(use_hook)
         self.assertTrue(use_hook({"send_mode": "hook"}))
         self.assertFalse(use_hook({"send_mode": "gui"}))
+
+    def test_hook_send_rejects_not_logged_in_without_waiting_for_database_confirmation(self):
+        from unittest.mock import patch
+
+        with patch.object(bridge.urllib.request, "urlopen") as urlopen:
+            urlopen.return_value.__enter__.return_value.read.return_value = (
+                b'{"msg":"not logged in","ret":-2}'
+            )
+            with self.assertRaisesRegex(RuntimeError, "not logged in"):
+                bridge.send_wechat_hook(
+                    {"hook_url": "http://127.0.0.1:30001"}, "wxid_peer", "hello"
+                )
+
+    def test_slow_turn_is_delivered_before_automatic_compaction(self):
+        from datetime import datetime
+        from unittest.mock import patch
+
+        events = []
+        peer = "wxid_peer"
+        now = datetime(2026, 9, 23, 10, 0, tzinfo=bridge.TOKYO_TIMEZONE)
+        msg = {
+            "sort_seq": int(now.timestamp() * 1000),
+            "sender_id": 2,
+            "type": "文本",
+            "content": "早上好",
+        }
+
+        class FakeDB:
+            def get_sessions(self, limit):
+                return [{"username": peer}]
+
+            def get_new_messages(self, requested_peer, since_seq, limit):
+                return [msg] if requested_peer == peer else []
+
+        chat = {
+            "last_seq": 0,
+            "model": "qwen",
+            "thinking": "off",
+            "humanized": False,
+            "daily_help_date": "2026-09-23",
+        }
+        state = {"own_user": "wxid_ai", "activated_at": 0, "chats": {peer: chat}}
+        config = {
+            "send_mode": "hook",
+            "ai_sender_id": 1,
+            "initial_model": "qwen",
+            "agent": "wechat-public",
+            "session_key_prefix": "wechat-test",
+            "models": {"qwen": "llama-cpp/example"},
+            "humanized_delay_seconds": 0,
+        }
+
+        def send_reply(_db, _peer, _parts, _sender, _delay, config=None):
+            events.append("send")
+
+        def compact(_config, _peer, _chat, elapsed_seconds):
+            events.append("compact")
+
+        with patch.object(bridge, "save_state"), \
+                patch.object(bridge, "find_sticker_followup", return_value=None), \
+                patch.object(bridge, "maybe_auto_compact_before_turn"), \
+                patch.object(bridge, "ask_openclaw", return_value="早上好。"), \
+                patch.object(bridge, "send_wechat_sequence", side_effect=send_reply), \
+                patch.object(bridge, "maybe_auto_compact", side_effect=compact), \
+                patch.object(bridge.time, "monotonic",
+                             side_effect=[0.0, 1.0, 101.0, 102.0, 103.0]):
+            bridge.process_new_messages(FakeDB(), config, state)
+
+        self.assertEqual(events, ["send", "compact"])
 
 
     def test_group_summary_uses_only_the_latest_seventy_messages(self):
@@ -736,6 +1183,22 @@ class BridgeTests(unittest.TestCase):
         self.assertFalse(bridge.should_compact_before_turn(22000, 32768, 0.70))
         self.assertTrue(bridge.should_compact_before_turn(23000, 32768, 0.70))
         self.assertFalse(bridge.should_compact_before_turn(0, 32768, 0.70))
+
+    def test_switch_to_qwen_uses_local_budget_before_compaction(self):
+        from unittest.mock import patch
+        usage = {"totalTokens": 27436, "contextTokens": 1000000}
+        with patch.object(bridge, "get_openclaw_session_usage", return_value=usage), \
+                patch.object(bridge, "compact_openclaw_session", return_value={}) as compact:
+            bridge.maybe_auto_compact_before_turn({}, "wxid_main", {"model": "qwen"})
+            compact.assert_called_once()
+
+    def test_deepseek_keeps_its_larger_context_budget(self):
+        from unittest.mock import patch
+        usage = {"totalTokens": 27436, "contextTokens": 1000000}
+        with patch.object(bridge, "get_openclaw_session_usage", return_value=usage), \
+                patch.object(bridge, "compact_openclaw_session", return_value={}) as compact:
+            bridge.maybe_auto_compact_before_turn({}, "wxid_main", {"model": "deepseek"})
+            compact.assert_not_called()
 
     def test_sanitize_reply_removes_openclaw_truncation_notice(self):
         text = "这是已经生成的内容。\n\n⚠️ Reply truncated at the model's output token limit. The text above is partial — ask to continue it."

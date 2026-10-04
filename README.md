@@ -1,14 +1,24 @@
 # OpenClaw WeChat AI Bot
 
-一个基于 OpenClaw、llama.cpp、DeepSeek、Qwen 和 Docker SearXNG 的微信 AI 机器人。
+一个基于 OpenClaw、llama.cpp、DeepSeek、Qwen 和 SearXNG 的微信 AI 机器人。
 
-An AI bot for WeChat built with OpenClaw, llama.cpp, DeepSeek, Qwen, and Docker SearXNG.
+An AI bot for WeChat built with OpenClaw, llama.cpp, DeepSeek, Qwen, and SearXNG.
+
+## 最新更新 | Latest updates — 2026-10-04
+
+- 自动检索变化事实，搜索追问在 10 分钟内结合前一主题重新检索；保留 `/search`。/ Automatic retrieval for changing facts and topic-aware follow-up searches within ten minutes; `/search` remains available.
+- 搜索与普通聊天共用隔离会话，修复追问丢失上下文。/ Search and chat share the same isolated session, fixing missing follow-up context.
+- 状态栏显示“已联网”，提前压缩 Qwen 上下文，异常短回复重试一次。/ Verified retrieval status, earlier Qwen compaction, and one retry for suspiciously short replies.
+- 当前搜索运行于 WSL 原生 SearXNG；修图功能已停用。/ Search currently uses native SearXNG in WSL; image editing is disabled.
+- 101 项回归测试通过，用户确认微信追问测试正常；联网标记不保证事实准确。/ 101 regression tests passed and the user confirmed WeChat follow-ups work; retrieval does not guarantee factual accuracy.
+
+详细记录 / Details: [自然联网与上下文修复](docs/NATURAL_NETWORK_2026-10-04.md) · [搜索部署恢复](docs/SEARCH_RECOVERY_2026-10-04.md) · [项目总结](OPENCLAW_WECHAT_PROJECT_SUMMARY.md)
 
 ## 项目简介 | Overview
 
-本项目通过独立微信账号接收私聊和群聊消息，使用 OpenClaw 管理会话和模型路由，并通过 WeChat Hook 发送回复。模型可以在云端 DeepSeek 与本地 Qwen 之间切换，联网搜索由本机 Docker 中的 SearXNG 完成。
+本项目通过独立微信账号接收私聊和群聊消息，使用 OpenClaw 管理会话和模型路由，并通过 WeChat Hook 发送回复。模型可以在云端 DeepSeek 与本地 Qwen 之间切换，联网搜索目前由 WSL 中的原生 SearXNG 完成；也支持 Docker 部署。
 
-This project uses a dedicated WeChat account for private and group conversations. OpenClaw manages sessions and model routing, while WeChat Hook sends replies. Users can switch between cloud DeepSeek and local Qwen. Web search is provided by a local SearXNG container running in Docker.
+This project uses a dedicated WeChat account for private and group conversations. OpenClaw manages sessions and model routing, while WeChat Hook sends replies. Users can switch between cloud DeepSeek and local Qwen. Web search currently runs through native SearXNG in WSL; Docker deployment remains an option.
 
 ## 主要能力 | Features
 
@@ -20,7 +30,7 @@ This project uses a dedicated WeChat account for private and group conversations
 - DeepSeek V4.1 Flash 高准确识图 / DeepSeek V4.1 Flash visual recognition
 - 群聊 `@` 触发和回复时 `@` 实际发送者 / Group mentions and sender mentions
 - 最近群消息总结 / Summarize recent group messages
-- Docker SearXNG 联网搜索 / Web search through Docker SearXNG
+- SearXNG 联网搜索 / Web search through local SearXNG
 - 搜索结果按日期优先归纳 / Date-aware search result synthesis
 - 搜索结果纯文本润色 / Plain-text cleanup for WeChat
 - 每个微信用户独立会话记忆 / Per-user conversation isolation
@@ -38,7 +48,7 @@ Python WeChat Bridge
           │      ├── DeepSeek API
           │      └── llama.cpp → local Qwen
           │
-          └── Docker SearXNG → search results → model summary
+          └── SearXNG → search results → model summary
 ```
 
 核心组件：
@@ -46,7 +56,7 @@ Python WeChat Bridge
 - `outputs/WeChatAI/bridge.py`：消息读取、命令解析、会话隔离、回复发送和搜索归纳。
 - OpenClaw `wechat-public`：模型路由、上下文管理和工具权限。
 - llama.cpp：提供本地 Qwen 推理接口。
-- Docker SearXNG：本地联网搜索服务，避免直接依赖 Google 网页验证。
+- SearXNG：本地联网搜索服务，避免直接依赖 Google 网页验证。
 - WeChat Hook：后台发送消息，不需要抢占鼠标或前台窗口。
 
 Core components:
@@ -54,7 +64,7 @@ Core components:
 - `outputs/WeChatAI/bridge.py`: message polling, command parsing, session isolation, delivery, and search synthesis.
 - OpenClaw `wechat-public`: model routing, context management, and tool permissions.
 - llama.cpp: local Qwen inference endpoint.
-- Docker SearXNG: local web search service without direct Google browser automation.
+- SearXNG: local web search service without direct Google browser automation.
 - WeChat Hook: background message delivery without taking over the mouse or foreground window.
 
 ## 使用命令 | Commands
@@ -122,7 +132,7 @@ Make sure the OpenClaw Gateway is running and that the `wechat-public` agent all
 
 ## 部署步骤 | Deployment Guide
 
-### A. 部署 Docker SearXNG | Deploy Docker SearXNG
+### A. 部署 SearXNG | Deploy SearXNG
 
 1. 安装并启动 Docker Desktop。
 2. 确认 Docker 引擎处于运行状态。
