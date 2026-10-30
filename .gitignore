@@ -21,8 +21,38 @@ __pycache__/
 
 # Local configuration containing account identifiers or endpoints
 outputs/WeChatAI/config.json
+outputs/WeChatAI/config.json.*
+outputs/WeChatAI/wechat_login_qr.png
+outputs/WeChatAI/wechat_update_block_state.json
+outputs/WeChatAI/wechatauto_logs/
+
+# Local backups and one-off work files (backups hold real configs and chat IDs)
+work/backup_*/
+work/backups/
+work/tmp_dump*/
+work/inspect_*/
+work/image_hook_diag_out/
+work/self_image_probe/
+work/vision_e2e_*/
+work/retired_local_components/
+work/retired_local_tests/
+work/*_result.json
+work/*_probe.json
+work/*_probe.txt
+
+# Third-party sources kept locally (WeChat Hook builds, patched wechatauto copy)
+work/WeChat-Hook-upstream/
+work/WechatHook4.1.10.27-fixed/
+work/wechatauto-replica/
+
+# Tool and debug leftovers
+.codex-remote-attachments/
+.serena/
+bing_debug.html
+search_debug.txt
 
 # Build/editor artifacts
+outputs/WeChatAI/BotSwitch.exe
 dist/
 build/
 .idea/

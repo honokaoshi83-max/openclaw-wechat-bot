@@ -1,340 +1,74 @@
-# OpenClaw WeChat AI Bot
-
-一个基于 OpenClaw、llama.cpp、DeepSeek、Qwen 和 SearXNG 的微信 AI 机器人。
-
-An AI bot for WeChat built with OpenClaw, llama.cpp, DeepSeek, Qwen, and SearXNG.
-
-## 最新更新 | Latest updates — 2026-10-04
-
-- 自动检索变化事实，搜索追问在 10 分钟内结合前一主题重新检索；保留 `/search`。/ Automatic retrieval for changing facts and topic-aware follow-up searches within ten minutes; `/search` remains available.
-- 搜索与普通聊天共用隔离会话，修复追问丢失上下文。/ Search and chat share the same isolated session, fixing missing follow-up context.
-- 状态栏显示“已联网”，提前压缩 Qwen 上下文，异常短回复重试一次。/ Verified retrieval status, earlier Qwen compaction, and one retry for suspiciously short replies.
-- 当前搜索运行于 WSL 原生 SearXNG；修图功能已停用。/ Search currently uses native SearXNG in WSL; image editing is disabled.
-- 101 项回归测试通过，用户确认微信追问测试正常；联网标记不保证事实准确。/ 101 regression tests passed and the user confirmed WeChat follow-ups work; retrieval does not guarantee factual accuracy.
-
-详细记录 / Details: [自然联网与上下文修复](docs/NATURAL_NETWORK_2026-10-04.md) · [搜索部署恢复](docs/SEARCH_RECOVERY_2026-10-04.md) · [项目总结](OPENCLAW_WECHAT_PROJECT_SUMMARY.md)
-
-## 项目简介 | Overview
-
-本项目通过独立微信账号接收私聊和群聊消息，使用 OpenClaw 管理会话和模型路由，并通过 WeChat Hook 发送回复。模型可以在云端 DeepSeek 与本地 Qwen 之间切换，联网搜索目前由 WSL 中的原生 SearXNG 完成；也支持 Docker 部署。
-
-This project uses a dedicated WeChat account for private and group conversations. OpenClaw manages sessions and model routing, while WeChat Hook sends replies. Users can switch between cloud DeepSeek and local Qwen. Web search currently runs through native SearXNG in WSL; Docker deployment remains an option.
-
-## 主要能力 | Features
+> 2026-10-29 拟人化更新：已启用会话队列、表情缓存、心情与保守成员档案；自动公告关闭，旧括号状态栏彻底移除。已接入的两个群加入白名单，主动发言仍为影子模式。详细开关见 docs/HUMANIZE_2026-10-29.md。
 
-- 私聊和群聊回复 / Private and group chat replies
-- DeepSeek 与本地 Qwen 切换 / Switch between DeepSeek and local Qwen
-- 新账号和新会话默认使用本地 Qwen；可发送 /deepseek 手动切换 / New accounts and conversations default to local Qwen; send /deepseek to switch
-- `/fast` 和 `/think` 模式 / Fast and thinking modes
-- Qwen 低精度图片、表情包、GIF 识别 / Qwen image, emoji, and GIF recognition
-- DeepSeek V4.1 Flash 高准确识图 / DeepSeek V4.1 Flash visual recognition
-- 群聊 `@` 触发和回复时 `@` 实际发送者 / Group mentions and sender mentions
-- 最近群消息总结 / Summarize recent group messages
-- SearXNG 联网搜索 / Web search through local SearXNG
-- 搜索结果按日期优先归纳 / Date-aware search result synthesis
-- 搜索结果纯文本润色 / Plain-text cleanup for WeChat
-- 每个微信用户独立会话记忆 / Per-user conversation isolation
-- 回复文字数量和耗时提示 / Output length and response time notices
+# 大肥鱼微信 AI Bot / WeChat AI Bot
 
-## 技术架构 | Architecture
+当前架构：微信 Hook + Python 桥接 + OpenClaw + DeepSeek API + SearXNG。
+Current architecture: WeChat Hook, Python bridge, OpenClaw, DeepSeek API and SearXNG.
 
-```text
-WeChat desktop + Hook
-          │
-          ▼
-Python WeChat Bridge
-          │
-          ├── OpenClaw Gateway
-          │      ├── DeepSeek API
-          │      └── llama.cpp → local Qwen
-          │
-          └── SearXNG → search results → model summary
-```
+## 2026-10-29：统一 DeepSeek / DeepSeek only
 
-核心组件：
+文字、图片、表情包和 GIF 的现有视觉调用统一走 DeepSeek API。本地推理服务与本地生图、改图入口已移除。
+Text and existing visual workflows use DeepSeek API. Local inference, image generation and editing entrypoints have been retired.
 
-- `outputs/WeChatAI/bridge.py`：消息读取、命令解析、会话隔离、回复发送和搜索归纳。
-- OpenClaw `wechat-public`：模型路由、上下文管理和工具权限。
-- llama.cpp：提供本地 Qwen 推理接口。
-- SearXNG：本地联网搜索服务，避免直接依赖 Google 网页验证。
-- WeChat Hook：后台发送消息，不需要抢占鼠标或前台窗口。
+API 对当前模型和图片格式的实际支持以服务返回为准；此迁移不保证识图准确率。
+Actual image support depends on the provider response; this migration does not guarantee recognition accuracy.
 
-Core components:
+## 功能 / Features
 
-- `outputs/WeChatAI/bridge.py`: message polling, command parsing, session isolation, delivery, and search synthesis.
-- OpenClaw `wechat-public`: model routing, context management, and tool permissions.
-- llama.cpp: local Qwen inference endpoint.
-- SearXNG: local web search service without direct Google browser automation.
-- WeChat Hook: background message delivery without taking over the mouse or foreground window.
+- 私聊自然分段，群聊 @ 触发并回复对应发送者；群聊单段。
+- 联系人上下文隔离、群聊上下文、引用文字评论和核实。
+- 普通图片、引用图片、表情包和 GIF 的现有识别流程。
+- 自然联网、“搜索”“核实”及 /search；明确要求链接时提供来源链接。
+- 东京时间每日公告，夜间静默规则、上下文压缩、字数与耗时标注。
+- 开机后台自启、手动登录微信、BotSwitch.exe 开关。
 
-## 使用命令 | Commands
+Private/group chat, isolated private histories, quoted-message analysis, existing media recognition,
+web search, daily help, quiet hours, context management, response timing and a desktop switch.
 
-在微信中发送：
+## 指令 / Commands
 
-| 命令 | 作用 |
-| --- | --- |
-| `/deepseek` | 切换 DeepSeek |
-| `/qwen` | 切换本地 Qwen |
-| `/fast` | Qwen 快速模式 |
-| `/think` | Qwen 思考模式 |
-| `/compact` | 压缩当前会话上下文 |
-| `/reset` | 重置当前会话上下文 |
-| `/help` | 查看每日公告和帮助 |
-| `/search 关键词` | 联网搜索并归纳 |
-| `/clear` | 清除当前用户或群聊的会话记忆 |
-
-Send these commands in WeChat:
-
-- `/deepseek`: use DeepSeek.
-- `/qwen`: use local Qwen.
-- `/fast`: Qwen fast mode.
-- `/think`: Qwen thinking mode.
-- `/compact`: compact the current session context.
-- `/reset`: start a new session context.
-- `/help`: show the daily help notice.
-- `/search query`: search the web and summarize the results.
-- `/clear`: clear memory for the current private chat or group only.
-
-默认不会输出搜索链接。只有在查询中明确要求“标明链接”“提供来源”或“给出网址”时，才保留来源链接。
-
-Search replies omit URLs by default. URLs are kept only when the user explicitly asks for links or sources.
-
-## 安装与运行 | Installation and Run
+| 指令 | 用途 / Purpose |
+|---|---|
+| /help | 公告与使用帮助 / Help |
+| /search 关键词 | 联网搜索 / Web search |
+| /compact | 压缩上下文 / Compact context |
+| /reset | 重置上下文 / Reset context |
+| /clear | 清除当前会话记忆 / Clear conversation memory |
+| /deepseek、切换大肥鱼 | 兼容旧客户端的 DeepSeek 确认入口 / Legacy DeepSeek alias |
 
-### 1. 前置条件 | Prerequisites
+也可以直接说“搜索……”或“核实……”。所有会话均使用 DeepSeek；不再提供本地模型或绘图模式切换。
+All conversations use DeepSeek. Local model and drawing mode switches are no longer available.
 
-- Windows 10/11
-- WeChat desktop with the required Hook component
-- Python 3.12 or the project virtual environment
-- OpenClaw Gateway in WSL
-- Docker Desktop
-- llama.cpp server for local Qwen
+## 部署 / Deployment
 
-### 2. 启动 SearXNG | Start SearXNG
+1. 在 Windows 准备 Python 环境 work/.venv、项目的微信 Hook 与兼容微信版本；AI 账号使用配置的 Hook 端口。
+2. 在 WSL OpenClawGateway 安装 OpenClaw，注册 DeepSeek provider 和 wechat-public agent。只允许 web_search、web_fetch；不要给公开微信入口配置通用系统操作权限。
+3. 本机部署 SearXNG，当前项目使用 WSL 原生服务 127.0.0.1:8888，不要求 Docker Desktop。
+4. 在 outputs/WeChatAI/config.json 填写账号和 Hook 配置，models 仅保留 deepseek，initial_model 为 deepseek。
+5. 在本机安全设置 DEEPSEEK_API_KEY 用户环境变量；不要把密钥提交到 Git。start.ps1 会为视觉调用读取该用户变量；OpenClaw provider 另需配置有效凭据。
+6. 运行 enable_autostart.ps1 注册后台任务；安装控制台自启可用 install_bot_switch_autostart.ps1。微信仍由用户手动登录。
 
-使用 Docker Desktop 启动名为 `openclaw-searxng` 的容器，并将容器 8080 端口映射到本机 8888 端口。配置文件位于：
+Use the existing Windows Python environment and compatible WeChat Hook, configure OpenClaw in WSL,
+provide DeepSeek credentials, run SearXNG, then register the startup task. Keep credentials out of Git.
+The Hook server is local on port 30001; Gateway uses 18789; search uses 8888. No local model port is required.
 
-```text
-work/searxng/settings.yml
-```
+## 启停与检查 / Control and checks
 
-Start a container named `openclaw-searxng` and map container port 8080 to host port 8888. The configuration is stored at:
+- 控制台：outputs/WeChatAI/BotSwitch.exe。
+- 后台管理：Windows PowerShell 5.1 中执行 manage_bot_stack.ps1 -Action Start / Stop / Status。
+- 测试：work/.venv/Scripts/python.exe -m unittest discover -s work -p 'test_*.py'。
+- 不发送微信的实际模型检查：work/.venv/Scripts/python.exe work/verify_openclaw_turn.py。
+- 日志：work/wechat_ai_bridge_state/bridge.log、watchdog.log、startup.log。
 
-```text
-work/searxng/settings.yml
-```
+## 隐私 / Privacy
 
-### 3. 启动 OpenClaw | Start OpenClaw
+DeepSeek 是远程 API，提交的对话与识图图片会发送给 API 服务；搜索会向搜索引擎发送必要查询。
+DeepSeek is a remote API: prompts and recognition images are sent to the provider; search queries are sent to search engines.
+不要将运行状态、私人媒体、数据库或凭据上传 GitHub。
+Do not publish runtime state, private media, databases or credentials.
 
-确认 OpenClaw Gateway 正常运行，并在 `wechat-public` 智能体中允许 `web_search` 和 `web_fetch`。
+## 历史说明 / Historical notes
 
-Make sure the OpenClaw Gateway is running and that the `wechat-public` agent allows `web_search` and `web_fetch`.
-
-## 部署步骤 | Deployment Guide
-
-### A. 部署 SearXNG | Deploy SearXNG
-
-1. 安装并启动 Docker Desktop。
-2. 确认 Docker 引擎处于运行状态。
-3. 使用 `work/searxng/settings.yml` 创建 SearXNG 配置。
-4. 启动容器并映射端口：
-
-```powershell
-docker run -d --name openclaw-searxng `
-  -p 127.0.0.1:8888:8080 `
-  -v "${PWD}\work\searxng\settings.yml:/etc/searxng/settings.yml:ro" `
-  searxng/searxng:latest
-```
-
-5. 验证服务：
-
-```powershell
-Invoke-RestMethod "http://127.0.0.1:8888/search?q=test&format=json"
-```
-
-如果容器已经存在，使用 `docker start openclaw-searxng`，不要重复创建。
-
-If the container already exists, use `docker start openclaw-searxng` instead of creating it again.
-
-### B. 部署 OpenClaw Gateway | Deploy OpenClaw Gateway
-
-1. 在 WSL 中安装 Node.js 和 OpenClaw。
-2. 创建或确认 `wechat-public` 智能体。
-3. 配置 DeepSeek API 凭据（如使用 DeepSeek）。
-4. 配置本地搜索地址和工具权限：
-
-```json
-{
-  "tools": {
-    "web": {
-      "search": {
-        "enabled": true,
-        "provider": "searxng"
-      }
-    }
-  },
-  "agents": {
-    "entries": {
-      "wechat-public": {
-        "tools": {
-          "profile": "coding",
-          "allow": ["web_search", "web_fetch"]
-        }
-      }
-    }
-  }
-}
-```
-
-5. 将 SearXNG 地址配置为 `http://127.0.0.1:8888`。
-6. 验证并重启：
-
-```bash
-openclaw config validate
-openclaw gateway restart
-curl http://127.0.0.1:18789/health
-```
-
-健康检查返回 `status: live` 后再继续下一步。
-
-### C. 部署本地 Qwen | Deploy local Qwen
-
-1. 安装 llama.cpp server。
-2. 准备支持文本和图像输入的 Qwen GGUF 模型。
-3. 启动 OpenAI 兼容接口，默认地址：
-
-```text
-http://127.0.0.1:8080/v1
-```
-
-4. 在 OpenClaw 模型提供商中填写 llama.cpp 的 `baseUrl`、模型 ID、上下文长度和输出上限。
-5. 先用 OpenClaw 或 curl 做一次本地文本测试，再启动微信桥接。
-
-The local Qwen endpoint must be reachable before `/qwen` or image recognition can work.
-
-### D. 配置微信 Hook | Configure WeChat Hook
-
-1. 手动登录 AI 微信账号。
-2. 启动与当前微信版本匹配的 WeChat Hook 服务。
-3. 确认发送接口可访问：
-
-```text
-http://127.0.0.1:30001/SendTextMsg
-```
-
-4. 确认 Hook 读取到当前 AI 微信账号，并记录账号 wxid。
-
-The Hook process and WeChat account must belong to the same desktop session.
-
-### E. 配置并启动桥接 | Configure and Start the Bridge
-
-复制示例配置并按本机情况修改：
-
-```text
-outputs/WeChatAI/config.json
-```
-
-至少需要确认：
-
-```json
-{
-  "ai_account_dir": "你的 AI 微信账号目录",
-  "main_peer": "主微信 wxid",
-  "send_mode": "hook",
-  "hook_url": "http://127.0.0.1:30001",
-  "agent": "wechat-public",
-  "searxng_url": "http://127.0.0.1:8888"
-}
-```
-
-启动：
-
-```powershell
-.\outputs\WeChatAI\start.ps1
-```
-
-检查日志：
-
-```powershell
-Get-Content ".\work\wechat_ai_bridge_state\bridge.log" -Tail 30
-```
-
-看到 `bridge ready` 和 `online recovery complete` 后，发送一条普通文字测试，再测试 `/help` 和 `/search 测试关键词`。
-
-### F. 开机启动 | Start at Boot
-
-推荐只设置后台服务自启：
-
-- Docker Desktop：系统登录后自动启动；
-- OpenClaw Gateway：使用 systemd user service；
-- llama.cpp：使用隐藏启动脚本或任务计划程序；
-- 微信：手动登录 AI 账号；
-- WeChat Bridge：使用任务计划程序，在微信和 Hook 就绪后启动 `start.ps1`。
-
-Do not store API keys or WeChat credentials in the startup scripts. Keep them in local-only configuration or the system credential store.
-
-### 4. 登录微信并启动桥接 | Log in to WeChat and start the bridge
-
-微信账号需要手动登录，然后在项目目录运行：
-
-```powershell
-.\outputs\WeChatAI\start.ps1
-```
-
-停止桥接：
-
-```powershell
-.\outputs\WeChatAI\stop.ps1
-```
-
-Log in to WeChat manually, then run the start script from the project directory. Use `stop.ps1` to stop the bridge.
-
-## 配置 | Configuration
-
-运行配置文件不应提交到公开仓库。请根据本机环境创建：
-
-```text
-outputs/WeChatAI/config.json
-```
-
-不要上传微信账号目录、wxid、Hook 密钥、API Key、数据库、缓存或日志。
-
-Do not commit WeChat account directories, wxids, Hook credentials, API keys, databases, caches, or logs.
-
-## 应用场景 | Use Cases
-
-- 个人微信 AI 助手 / Personal WeChat AI assistant
-- 本地模型聊天和隐私优先的问答 / Local-model chat and privacy-oriented Q&A
-- 群聊问答、群消息总结 / Group Q&A and conversation summaries
-- 新闻和赛事等实时信息查询 / Current news and event lookup
-- 图片、表情包和 GIF 内容理解 / Understanding images, emojis, and GIFs
-- 电脑后台运行的自动化客服或信息助手 / Background automation for support and information services
-
-## 隐私与安全 | Privacy and Security
-
-私聊记忆按微信用户隔离。联网搜索只发送搜索问题和必要的摘要内容。使用云端 DeepSeek 时，对话内容会发送到对应 API；使用本地 Qwen 时，文本推理在本机 llama.cpp 服务中完成。
-
-Private conversation memory is isolated by WeChat user. Web search sends only the query and the minimum required summaries. When DeepSeek is selected, conversation content is sent to its API. When local Qwen is selected, text inference runs through the local llama.cpp service.
-
-## 测试 | Tests
-
-运行桥接测试：
-
-```powershell
-.\work\.venv\Scripts\python.exe -m unittest work.test_bridge
-```
-
-当前基线为 70 项测试全部通过。
-
-The current baseline is 70 passing tests.
-
-## 项目状态 | Project Status
-
-详细进度和已知限制见：
-
-```text
-OPENCLAW_WECHAT_PROJECT_SUMMARY.md
-```
-
-See `OPENCLAW_WECHAT_PROJECT_SUMMARY.md` for detailed progress and known limitations.
-
+旧功能代码和说明保存在 work/retired_local_components 及 work/backups，用于回滚，不在 Bot 活跃导入路径中。
+旧专项文档仅代表对应日期；当前变更见 docs/BOT_DEEPSEEK_ONLY_2026-10-29.md。
+Retired sources are kept as inert backup files. Historical documents describe earlier versions.
