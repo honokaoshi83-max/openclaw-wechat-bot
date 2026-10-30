@@ -24,6 +24,10 @@ class EngineTests(unittest.TestCase):
         self.assertTrue(chat_engine.enabled_for(CONFIG, PEER))
         self.assertFalse(chat_engine.enabled_for(CONFIG, "2@chatroom"))
         self.assertFalse(chat_engine.enabled_for({**CONFIG, "direct_chat_enabled": False}, PEER))
+        all_groups = {**CONFIG, "direct_chat_all_groups": True}
+        self.assertTrue(chat_engine.enabled_for(all_groups, "2@chatroom"))
+        self.assertFalse(chat_engine.enabled_for(all_groups, "wxid_private"))
+        self.assertFalse(chat_engine.enabled_for({**all_groups, "direct_chat_enabled": False}, "2@chatroom"))
 
     def test_messages_keep_a_stable_cacheable_prefix(self):
         a = chat_engine.build_messages({}, "第一句")
@@ -49,6 +53,9 @@ class EngineTests(unittest.TestCase):
         with patch.dict("os.environ", {"DEEPSEEK_API_KEY": "k"}), \
                 patch("urllib.request.urlopen", return_value=response("赌狗没有好下场[]")):
             self.assertEqual(chat_engine.complete({}, "x"), "赌狗没有好下场")
+        with patch.dict("os.environ", {"DEEPSEEK_API_KEY": "k"}), \
+                patch("urllib.request.urlopen", return_value=response("我这没对准，不敢硬报[citation:来源]。")):
+            self.assertEqual(chat_engine.complete({}, "x"), "我这没对准，不敢硬报。")
 
     def test_empty_reply_raises(self):
         with patch.dict("os.environ", {"DEEPSEEK_API_KEY": "k"}), \
@@ -221,6 +228,78 @@ class ToolRoutingTests(unittest.TestCase):
         fetch.assert_called_once_with("https://a.example")
         self.assertTrue(ok)
         self.assertIn("正文", text)
+
+
+class TaskIntentTests(unittest.TestCase):
+    def test_task_markers_separate_requests_from_banter(self):
+        for text in ("大肥鱼 你预测一下今晚谁会赢", "客观分析一下两边", "你猜他为啥生气", "帮我想个群名",
+                     "BLG 下一场你押几比几", "BLG 能不能进四强"):
+            self.assertTrue(bridge.is_task_request(text), text)
+        for text in ("哈哈哈 笑死", "今天食堂又是土豆", "在吗"):
+            self.assertFalse(bridge.is_task_request(text), text)
+
+    def route(self, task):
+        engine = MagicMock(return_value=chat_engine.ChatReply("我押GEN"))
+        config = {**CONFIG, "direct_chat_task_temperature": 0.7}
+        with patch.object(bridge.chat_engine, "complete", engine), \
+                patch.object(bridge, "ask_openclaw"), patch.object(bridge, "contextual_search_query", return_value=None):
+            bridge.ask_chat(config, PEER, {"session_epoch": 0}, "prompt",
+                            direct=("这句是小王对你说的。", "", "小王"), text="你预测一下谁会赢", task=task)
+        return engine.call_args
+
+    def test_task_turns_get_the_hint_and_a_lower_temperature(self):
+        call = self.route(task=True)
+        self.assertIn("这是在请你做事或下判断", call.args[1])
+        self.assertEqual(call.kwargs["temperature"], 0.7)
+
+    def test_banter_keeps_the_default_temperature_and_no_hint(self):
+        call = self.route(task=False)
+        self.assertNotIn("这是在请你做事或下判断", call.args[1])
+        self.assertIsNone(call.kwargs["temperature"])
+
+    def test_chime_ins_never_search_or_follow_up_an_old_topic(self):
+        engine = MagicMock(return_value=chat_engine.ChatReply("又下雨 适合瘫着"))
+        config = {**CONFIG, "direct_chat_tools_enabled": True}
+        with patch.object(bridge.chat_engine, "complete", engine), patch.object(bridge, "ask_openclaw") as openclaw, \
+                patch.object(bridge, "contextual_search_query", return_value="BLG 赛程；追问：周末去哪玩啊"):
+            bridge.ask_chat(config, PEER, {"session_epoch": 0}, "prompt",
+                            direct=("你没被点名，是看到阿杰这句话想插一句。", "", "阿杰"), text="周末去哪玩啊",
+                            ambient=True)
+        openclaw.assert_not_called()
+        self.assertIsNone(engine.call_args.kwargs["tool_runner"])
+        self.assertNotIn("先查再答", engine.call_args.args[1])
+        self.assertIn("接的是最后这一句本身", engine.call_args.args[1])
+
+    def test_complete_uses_the_given_temperature(self):
+        with patch.dict("os.environ", {"DEEPSEEK_API_KEY": "k"}), \
+                patch("urllib.request.urlopen", return_value=response("好")) as urlopen:
+            chat_engine.complete({"direct_chat_temperature": 1.3}, "x", temperature=0.7)
+        self.assertEqual(json.loads(urlopen.call_args.args[0].data)["temperature"], 0.7)
+
+    def test_examples_no_longer_teach_dodging(self):
+        answers = " ".join(item["a"] for item in chat_engine._read("examples.json")["items"])
+        for dodge in ("这我哪知道", "别问我", "乱报"):
+            self.assertNotIn(dodge, answers)
+
+    def test_addressed_requests_are_tasks_but_chime_ins_are_not(self):
+        class FakeDB:
+            def get_group_members(self, group):
+                return [{"username": "wxid_a", "nick_name": "小明"}]
+
+            def get_messages(self, group, limit):
+                return []
+
+        for ambient, expected in ((False, True), (True, False)):
+            task = {"peer": PEER, "request": "你预测一下谁会赢", "ambient": ambient,
+                    "msg": {"sort_seq": 4000, "sender_username": "wxid_a", "sender_id": 2,
+                            "content": "wxid_a:\n@大肥鱼 你预测一下谁会赢"}}
+            state = {"chats": {PEER: {"model": "deepseek", "thinking": "off"}}}
+            with patch.object(bridge, "ask_chat", return_value="押GEN") as ask, \
+                    patch.object(bridge, "maybe_auto_compact"), patch.object(bridge, "save_state"), \
+                    patch.object(bridge, "send_wechat"):
+                bridge.process_group_task(FakeDB(), {"ai_sender_id": 1}, state, task)
+            self.assertIs(ask.call_args.kwargs["task"], expected)
+            self.assertIs(ask.call_args.kwargs["ambient"], ambient)
 
 
 if __name__ == "__main__":

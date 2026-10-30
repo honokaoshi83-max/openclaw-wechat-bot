@@ -90,6 +90,7 @@ class CheckPersonaTests(unittest.TestCase):
     def test_flags_assistant_voice_and_markup_leak(self):
         self.assertIn("R1-assistant-voice", self.check("作为一个AI，希望对你有帮助"))
         self.assertIn("R8-leak-markup", self.check("[聊天语气参考：本地语气线索=开心]"))
+        self.assertIn("R8-leak-markup", self.check("不敢硬报[citation:来源]。"))
         self.assertIn("R9-system-error", self.check(reply_guard.BLOCKED_REPLY))
         self.assertIn("R16-wechat-emoji", self.check("哈哈[捂脸][旺柴]"))
 

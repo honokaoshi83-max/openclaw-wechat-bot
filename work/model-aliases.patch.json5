@@ -1,0 +1,10 @@
+{
+  agents: {
+    defaults: {
+      models: {
+        "deepseek/deepseek-v4-pro": { alias: "deepseek" },
+        "ollama/fredrezones55/Qwen3.5-Uncensored-HauhauCS-Aggressive:9b": { alias: "qwen" }
+      }
+    }
+  }
+}

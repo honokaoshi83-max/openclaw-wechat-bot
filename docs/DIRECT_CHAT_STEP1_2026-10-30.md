@@ -43,3 +43,9 @@
 ## 补充：删除旧搜索代码
 
 - 删除 `bridge.search_web`（Bing RSS 搜索，已无调用方）及只被它使用的 `xml.etree.ElementTree` 导入。所有搜索统一走 `searxng_results`（本机 SearXNG）。备份 `work/backup_remove_search_web_2026-10-30/`，回归 197 项通过。
+
+## 补充：推广到所有群（15:29）
+
+- `chat_engine.enabled_for` 支持 `direct_chat_all_groups`：打开后所有 `@chatroom` 群聊都走直连（含以后新加入的群），`direct_chat_peers` 仍可单独列会话。私聊不受影响，仍走 OpenClaw：私聊处理没有经过 `ask_chat`，且直连引擎还没有私聊记忆（第 3 步）。
+- 当前：2 个群走直连，4 个私聊走 OpenClaw。回退：`direct_chat_all_groups` 改 false（只剩测试群）或 `direct_chat_enabled` 改 false（全部回 OpenClaw），再重启。
+- 测试通过；备份 `work/backup_all_groups_2026-10-30/`；15:29 重启。

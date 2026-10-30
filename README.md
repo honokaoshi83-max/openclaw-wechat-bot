@@ -1,3 +1,14 @@
+> [!CAUTION]
+> **本项目已归档，不再维护，请勿部署使用。**
+>
+> 本项目通过向微信 PC 客户端注入未签名的 Hook DLL（`version.dll`）来收发消息，属于微信禁止的第三方插件。2026-10-30 实际发生：
+> - Bot 小号因"非法插件"被冻结，需本人扫脸才能解冻；
+> - 曾在同一台电脑、同一安装目录登录过的个人主号也收到了"非法插件"警告。
+>
+> 使用这类方案可能导致账号被警告、冻结或封禁，且解冻需要实名验证，风险会牵连到本人的其他账号。Hook 的 HTTP 接口还监听在 `0.0.0.0`，同一局域网内的设备都能调用。仓库仅作为技术记录保留。
+>
+> **This project is archived and unmaintained. Do not deploy it.** It drives WeChat through an injected, unsigned hook DLL, which WeChat treats as an illegal plugin: on 2026-10-30 the bot account was frozen (unfrozen only by face verification) and the owner's personal account received an illegal-plugin warning. Using this approach can get accounts warned, frozen or banned.
+
 > 2026-10-29 拟人化更新：已启用会话队列、表情缓存、心情与保守成员档案；自动公告关闭，旧括号状态栏彻底移除。已接入的两个群加入白名单，主动发言仍为影子模式。详细开关见 docs/HUMANIZE_2026-10-29.md。
 
 # 大肥鱼微信 AI Bot / WeChat AI Bot
